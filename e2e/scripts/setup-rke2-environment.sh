@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # =============================================================================
-# Ramen DR Setup Script for RKE2 + Longhorn
+# Ramen DR Setup Script for RKE2 + Longhorn + KubeVirt (SUSE Virtualization)
 # =============================================================================
 #
 # This script sets up a complete Ramen DR test environment on RKE2 clusters.
@@ -53,6 +53,12 @@ VELERO_VERSION="v1.14.0"
 VELERO_PLUGIN_VERSION="v1.10.0"
 VOLSYNC_VERSION="0.10"
 LONGHORN_VERSION="v1.7.2"
+
+# KubeVirt configuration (optional - set ENABLE_KUBEVIRT=true to install)
+ENABLE_KUBEVIRT="${ENABLE_KUBEVIRT:-false}"
+KUBEVIRT_VERSION="${KUBEVIRT_VERSION:-v1.4.0}"
+CDI_VERSION="${CDI_VERSION:-v1.60.4}"
+KUBEVIRT_VELERO_PLUGIN_VERSION="${KUBEVIRT_VELERO_PLUGIN_VERSION:-v1.2.0}"
 
 # =============================================================================
 # COLORS AND LOGGING
@@ -445,10 +451,17 @@ EOF
 
         log_info "Installing Velero on $ctx..."
 
+        # Build plugins list
+        local plugins="velero/velero-plugin-for-aws:${VELERO_PLUGIN_VERSION}"
+        if [[ "$ENABLE_KUBEVIRT" == "true" ]]; then
+            plugins="${plugins},kubevirt/kubevirt-velero-plugin:${KUBEVIRT_VELERO_PLUGIN_VERSION}"
+            log_info "  Including kubevirt-velero-plugin for VM backup support"
+        fi
+
         velero install \
             --kubeconfig "$kc" \
             --provider aws \
-            --plugins "velero/velero-plugin-for-aws:${VELERO_PLUGIN_VERSION}" \
+            --plugins "$plugins" \
             --bucket "$MINIO_BUCKET" \
             --secret-file "$creds_file" \
             --backup-location-config "region=minio,s3ForcePathStyle=true,s3Url=${minio_endpoint}" \
@@ -484,6 +497,114 @@ install_volsync() {
     done
 
     log_success "VolSync installation complete"
+}
+
+# =============================================================================
+# PHASE: INSTALL KUBEVIRT (Optional)
+# =============================================================================
+
+install_kubevirt() {
+    if [[ "$ENABLE_KUBEVIRT" != "true" ]]; then
+        log_info "Skipping KubeVirt (ENABLE_KUBEVIRT not set to true)"
+        return 0
+    fi
+
+    log_info "=========================================="
+    log_info "Phase: Installing KubeVirt"
+    log_info "=========================================="
+
+    for ctx in dr1 dr2; do
+        local kc_var="${ctx^^}_KUBECONFIG"
+        local kc="${!kc_var}"
+
+        log_info "Installing KubeVirt ${KUBEVIRT_VERSION} on $ctx..."
+
+        # Install KubeVirt operator
+        KUBECONFIG="$kc" kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+
+        # Wait for operator
+        sleep 10
+        wait_for_deployment "kubevirt" "virt-operator" "$kc" 180
+
+        # Create KubeVirt CR
+        KUBECONFIG="$kc" kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+
+        # Wait for KubeVirt to be ready
+        log_info "Waiting for KubeVirt components on $ctx..."
+        local timeout=300
+        local elapsed=0
+        while [[ $elapsed -lt $timeout ]]; do
+            local phase
+            phase=$(KUBECONFIG="$kc" kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [[ "$phase" == "Deployed" ]]; then
+                log_success "KubeVirt deployed on $ctx"
+                break
+            fi
+            sleep 10
+            elapsed=$((elapsed + 10))
+            log_info "  Waiting for KubeVirt... (${elapsed}s, phase: ${phase:-unknown})"
+        done
+
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "KubeVirt deployment timed out on $ctx"
+        fi
+    done
+
+    log_success "KubeVirt installation complete"
+}
+
+# =============================================================================
+# PHASE: INSTALL CDI (Optional)
+# =============================================================================
+
+install_cdi() {
+    if [[ "$ENABLE_KUBEVIRT" != "true" ]]; then
+        log_info "Skipping CDI (ENABLE_KUBEVIRT not set to true)"
+        return 0
+    fi
+
+    log_info "=========================================="
+    log_info "Phase: Installing Containerized Data Importer (CDI)"
+    log_info "=========================================="
+
+    for ctx in dr1 dr2; do
+        local kc_var="${ctx^^}_KUBECONFIG"
+        local kc="${!kc_var}"
+
+        log_info "Installing CDI ${CDI_VERSION} on $ctx..."
+
+        # Install CDI operator
+        KUBECONFIG="$kc" kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+
+        # Wait for operator
+        sleep 10
+        wait_for_deployment "cdi" "cdi-operator" "$kc" 180
+
+        # Create CDI CR
+        KUBECONFIG="$kc" kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
+
+        # Wait for CDI to be ready
+        log_info "Waiting for CDI components on $ctx..."
+        local timeout=300
+        local elapsed=0
+        while [[ $elapsed -lt $timeout ]]; do
+            local phase
+            phase=$(KUBECONFIG="$kc" kubectl get cdi cdi -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [[ "$phase" == "Deployed" ]]; then
+                log_success "CDI deployed on $ctx"
+                break
+            fi
+            sleep 10
+            elapsed=$((elapsed + 10))
+            log_info "  Waiting for CDI... (${elapsed}s, phase: ${phase:-unknown})"
+        done
+
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "CDI deployment timed out on $ctx"
+        fi
+    done
+
+    log_success "CDI installation complete"
 }
 
 # =============================================================================
@@ -724,6 +845,28 @@ verify_setup() {
     echo "=== Storage Classes ==="
     KUBECONFIG="$DR1_KUBECONFIG" kubectl get sc longhorn-ramen -o wide || true
 
+    if [[ "$ENABLE_KUBEVIRT" == "true" ]]; then
+        echo ""
+        echo "=== KubeVirt (DR1) ==="
+        KUBECONFIG="$DR1_KUBECONFIG" kubectl get kubevirt -n kubevirt || true
+        KUBECONFIG="$DR1_KUBECONFIG" kubectl get pods -n kubevirt --no-headers | head -5 || true
+
+        echo ""
+        echo "=== CDI (DR1) ==="
+        KUBECONFIG="$DR1_KUBECONFIG" kubectl get cdi || true
+        KUBECONFIG="$DR1_KUBECONFIG" kubectl get pods -n cdi --no-headers | head -3 || true
+
+        echo ""
+        echo "=== KubeVirt (DR2) ==="
+        KUBECONFIG="$DR2_KUBECONFIG" kubectl get kubevirt -n kubevirt || true
+        KUBECONFIG="$DR2_KUBECONFIG" kubectl get pods -n kubevirt --no-headers | head -5 || true
+
+        echo ""
+        echo "=== CDI (DR2) ==="
+        KUBECONFIG="$DR2_KUBECONFIG" kubectl get cdi || true
+        KUBECONFIG="$DR2_KUBECONFIG" kubectl get pods -n cdi --no-headers | head -3 || true
+    fi
+
     log_success "Verification complete"
 }
 
@@ -737,7 +880,8 @@ Usage: $0 [OPTIONS]
 
 Options:
   --phase PHASE    Run specific phase only. Available phases:
-                   ocm, longhorn, snapshotter, minio, velero, volsync, ramen, config, e2e-config, verify, all
+                   ocm, longhorn, snapshotter, minio, velero, volsync,
+                   kubevirt, cdi, ramen, config, e2e-config, verify, all
   --verify         Run verification only
   --help           Show this help message
 
@@ -749,12 +893,23 @@ Environment Variables:
   MINIO_ACCESS_KEY MinIO access key (default: minio)
   MINIO_SECRET_KEY MinIO secret key (default: minio123)
 
+  ENABLE_KUBEVIRT  Set to 'true' to install KubeVirt and CDI for VM workloads
+  KUBEVIRT_VERSION KubeVirt version (default: v1.4.0)
+  CDI_VERSION      CDI version (default: v1.60.4)
+
 Example:
-  # Run all phases
+  # Run all phases (containers only)
   HUB_API_SERVER=https://192.168.1.10:6443 $0
+
+  # Run all phases with KubeVirt support (containers + VMs)
+  ENABLE_KUBEVIRT=true HUB_API_SERVER=https://192.168.1.10:6443 $0
 
   # Run specific phase
   $0 --phase ocm
+
+  # Install only KubeVirt components
+  ENABLE_KUBEVIRT=true $0 --phase kubevirt
+  ENABLE_KUBEVIRT=true $0 --phase cdi
 
   # Verify setup
   $0 --verify
@@ -789,6 +944,9 @@ main() {
     echo ""
     echo "=============================================="
     echo "  Ramen DR Setup for RKE2 + Longhorn"
+    if [[ "$ENABLE_KUBEVIRT" == "true" ]]; then
+        echo "  + KubeVirt (VM support enabled)"
+    fi
     echo "=============================================="
     echo ""
     echo "Configuration:"
@@ -796,6 +954,7 @@ main() {
     echo "  DR1 kubeconfig: $DR1_KUBECONFIG"
     echo "  DR2 kubeconfig: $DR2_KUBECONFIG"
     echo "  Hub API Server: ${HUB_API_SERVER:-auto-detect}"
+    echo "  KubeVirt:       ${ENABLE_KUBEVIRT}"
     echo ""
 
     check_prerequisites
@@ -808,6 +967,8 @@ main() {
             install_minio
             install_velero
             install_volsync
+            install_kubevirt
+            install_cdi
             install_ramen
             configure_ramen
             create_e2e_config
@@ -830,6 +991,12 @@ main() {
             ;;
         volsync)
             install_volsync
+            ;;
+        kubevirt)
+            install_kubevirt
+            ;;
+        cdi)
+            install_cdi
             ;;
         ramen)
             install_ramen
