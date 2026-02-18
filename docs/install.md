@@ -27,6 +27,7 @@ Before installing Ramen, ensure the following requirements are met:
 **Supported versions:**
 
 - Kubernetes 1.30 or higher
+- RKE2 v1.28 or higher (see [rke2-guide.md](rke2-guide.md) for details)
 
 ### 2. Open Cluster Management (OCM) Setup
 
@@ -310,6 +311,17 @@ kubectl delete crd drclusters.ramendr.openshift.io
 ```bash
 kubectl delete -k "https://github.com/RamenDR/ramen/config/olm-install/base?ref=main"
 ```
+
+## RKE2 Clusters
+
+For deploying Ramen on RKE2 clusters with Longhorn storage, see
+[rke2-guide.md](rke2-guide.md) for detailed instructions.
+
+**Key differences for RKE2:**
+
+- Uses Longhorn instead of ODF/Ceph for storage
+- Uses VolSync for async replication (Longhorn doesn't support VolumeReplication)
+- Namespaces: `ramen-system` and `ramen-ops` (same as vanilla Kubernetes)
 
 ## Development Installation
 
