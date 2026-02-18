@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+from drenv import cache
+
+os.chdir(os.path.dirname(__file__))
+cache.refresh("longhorn", "addons/longhorn-1.7.yaml")
+cache.refresh("storageclass", "addons/longhorn-storageclass.yaml")

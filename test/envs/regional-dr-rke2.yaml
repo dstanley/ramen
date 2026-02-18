@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Environment for testing Regional-DR on RKE2 clusters with Longhorn storage.
+---
+name: "rdr-rke2"
+
+ramen:
+  hub: hub
+  clusters: [dr1, dr2]
+  topology: regional-dr
+  features:
+    volsync: true
+
+templates:
+  - name: "dr-cluster-rke2"
+    driver: "$vm"
+    container_runtime: containerd
+    containerd:
+      plugins:
+        io.containerd.grpc.v1.cri:
+          device_ownership_from_security_context: true
+    network: "$network"
+    cpus: 4
+    memory: "8g"
+    extra_disks: 1
+    disk_size: "50g"
+    workers:
+      # Longhorn storage instead of Rook-Ceph
+      - addons:
+          - name: longhorn
+      - addons:
+          - name: ocm-cluster
+            args: ["$name", "hub"]
+          - name: recipe
+      - addons:
+          - name: external-snapshotter
+          - name: olm
+          - name: minio
+          - name: velero
+  - name: "hub-cluster-rke2"
+    driver: "$vm"
+    container_runtime: containerd
+    network: "$network"
+    cpus: 2
+    memory: "6g"
+    workers:
+      - addons:
+          - name: ocm-hub
+          - name: ocm-controller
+          - name: olm
+      - addons:
+          - name: argocd
+            args: ["hub", "dr1", "dr2"]
+
+profiles:
+  - name: "dr1"
+    template: "dr-cluster-rke2"
+  - name: "dr2"
+    template: "dr-cluster-rke2"
+  - name: "hub"
+    template: "hub-cluster-rke2"
+
+workers:
+  # VolSync for async replication (Longhorn doesn't have native mirroring like RBD)
+  - addons:
+      - name: volsync
+        args: ["dr1", "dr2"]

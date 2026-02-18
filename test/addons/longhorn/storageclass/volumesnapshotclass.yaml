@@ -1,0 +1,17 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# VolumeSnapshotClass for Longhorn
+# Used by VolSync for snapshot-based replication
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: longhorn-snapshot
+  labels:
+    # Ramen storage ID label for DR operations
+    ramendr.openshift.io/storageid: "longhorn"
+driver: driver.longhorn.io
+deletionPolicy: Delete
+parameters:
+  type: snap
