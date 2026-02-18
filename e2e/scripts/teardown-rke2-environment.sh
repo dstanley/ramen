@@ -28,6 +28,9 @@ DR2_KUBECONFIG="${DR2_KUBECONFIG:-$HOME/.kube/dr2-config}"
 
 RAMEN_NAMESPACE="ramen-system"
 
+# KubeVirt configuration
+ENABLE_KUBEVIRT="${ENABLE_KUBEVIRT:-false}"
+
 # =============================================================================
 # COLORS AND LOGGING
 # =============================================================================
@@ -201,6 +204,97 @@ teardown_volsync() {
     done
 
     log_success "VolSync removal complete"
+}
+
+# =============================================================================
+# PHASE: REMOVE CDI (Optional)
+# =============================================================================
+
+teardown_cdi() {
+    if [[ "$ENABLE_KUBEVIRT" != "true" ]]; then
+        log_info "Skipping CDI teardown (ENABLE_KUBEVIRT not set to true)"
+        return 0
+    fi
+
+    log_info "=========================================="
+    log_info "Phase: Removing CDI"
+    log_info "=========================================="
+
+    for ctx in dr1 dr2; do
+        local kc_var="${ctx^^}_KUBECONFIG"
+        local kc="${!kc_var}"
+
+        if [[ -f "$kc" ]]; then
+            log_info "Removing CDI from $ctx..."
+
+            # Delete CDI CR first
+            KUBECONFIG="$kc" kubectl delete cdi cdi --ignore-not-found=true 2>/dev/null || true
+
+            # Wait for CDI CR deletion
+            sleep 5
+
+            # Delete CDI operator
+            KUBECONFIG="$kc" kubectl delete -f "https://github.com/kubevirt/containerized-data-importer/releases/download/v1.60.4/cdi-operator.yaml" --ignore-not-found=true 2>/dev/null || true
+
+            # Delete namespace
+            safe_delete "namespace cdi" "$kc"
+        fi
+    done
+
+    log_success "CDI removal complete"
+}
+
+# =============================================================================
+# PHASE: REMOVE KUBEVIRT (Optional)
+# =============================================================================
+
+teardown_kubevirt() {
+    if [[ "$ENABLE_KUBEVIRT" != "true" ]]; then
+        log_info "Skipping KubeVirt teardown (ENABLE_KUBEVIRT not set to true)"
+        return 0
+    fi
+
+    log_info "=========================================="
+    log_info "Phase: Removing KubeVirt"
+    log_info "=========================================="
+
+    for ctx in dr1 dr2; do
+        local kc_var="${ctx^^}_KUBECONFIG"
+        local kc="${!kc_var}"
+
+        if [[ -f "$kc" ]]; then
+            log_info "Removing KubeVirt from $ctx..."
+
+            # Check for running VMs
+            local vm_count
+            vm_count=$(KUBECONFIG="$kc" kubectl get vmi -A --no-headers 2>/dev/null | wc -l || echo "0")
+            if [[ "$vm_count" -gt 0 ]]; then
+                log_warn "  Found $vm_count running VMIs on $ctx"
+                if ! confirm "  Delete all VMs and proceed?"; then
+                    log_info "  Skipping KubeVirt removal on $ctx"
+                    continue
+                fi
+                # Stop all VMs
+                KUBECONFIG="$kc" kubectl delete vmi --all -A --ignore-not-found=true 2>/dev/null || true
+                KUBECONFIG="$kc" kubectl delete vm --all -A --ignore-not-found=true 2>/dev/null || true
+                sleep 10
+            fi
+
+            # Delete KubeVirt CR first
+            KUBECONFIG="$kc" kubectl delete kubevirt kubevirt -n kubevirt --ignore-not-found=true 2>/dev/null || true
+
+            # Wait for KubeVirt CR deletion
+            sleep 10
+
+            # Delete KubeVirt operator
+            KUBECONFIG="$kc" kubectl delete -f "https://github.com/kubevirt/kubevirt/releases/download/v1.4.0/kubevirt-operator.yaml" --ignore-not-found=true 2>/dev/null || true
+
+            # Delete namespace
+            safe_delete "namespace kubevirt" "$kc"
+        fi
+    done
+
+    log_success "KubeVirt removal complete"
 }
 
 # =============================================================================
@@ -425,6 +519,10 @@ teardown_all() {
     log_warn "This will remove:"
     echo "  - Ramen operators and DR resources"
     echo "  - VolSync"
+    if [[ "$ENABLE_KUBEVIRT" == "true" ]]; then
+        echo "  - CDI (Containerized Data Importer)"
+        echo "  - KubeVirt and all VMs"
+    fi
     echo "  - Velero and all backups"
     echo "  - MinIO and all data"
     echo "  - External snapshotter"
@@ -440,6 +538,8 @@ teardown_all() {
 
     teardown_ramen
     teardown_volsync
+    teardown_cdi
+    teardown_kubevirt
     teardown_velero
     teardown_minio
     teardown_snapshotter
@@ -468,7 +568,8 @@ Usage: $0 [OPTIONS]
 
 Options:
   --phase PHASE    Teardown specific phase only. Available phases:
-                   ramen, volsync, velero, minio, snapshotter, longhorn-config, ocm, olm, e2e-config, all
+                   ramen, volsync, cdi, kubevirt, velero, minio, snapshotter,
+                   longhorn-config, ocm, olm, e2e-config, all
   --force          Skip confirmation prompts
   --help           Show this help message
 
@@ -477,6 +578,8 @@ Environment Variables:
   DR1_KUBECONFIG   Path to dr1 cluster kubeconfig (default: ~/.kube/dr1-config)
   DR2_KUBECONFIG   Path to dr2 cluster kubeconfig (default: ~/.kube/dr2-config)
 
+  ENABLE_KUBEVIRT  Set to 'true' to remove KubeVirt and CDI components
+
 Examples:
   # Full teardown (interactive)
   $0
@@ -484,8 +587,15 @@ Examples:
   # Full teardown (skip confirmations)
   $0 --force
 
+  # Full teardown including KubeVirt
+  ENABLE_KUBEVIRT=true $0 --force
+
   # Remove only Ramen
   $0 --phase ramen
+
+  # Remove KubeVirt components
+  ENABLE_KUBEVIRT=true $0 --phase kubevirt
+  ENABLE_KUBEVIRT=true $0 --phase cdi
 
   # Remove Ramen and Velero
   $0 --phase ramen --force && $0 --phase velero --force
@@ -520,6 +630,9 @@ main() {
     echo ""
     echo "=============================================="
     echo "  Ramen DR Teardown for RKE2 + Longhorn"
+    if [[ "$ENABLE_KUBEVIRT" == "true" ]]; then
+        echo "  + KubeVirt (VM support)"
+    fi
     echo "=============================================="
     echo ""
 
@@ -537,6 +650,16 @@ main() {
         volsync)
             if confirm "Remove VolSync?"; then
                 teardown_volsync
+            fi
+            ;;
+        cdi)
+            if confirm "Remove CDI?"; then
+                teardown_cdi
+            fi
+            ;;
+        kubevirt)
+            if confirm "Remove KubeVirt and all VMs?"; then
+                teardown_kubevirt
             fi
             ;;
         velero)
