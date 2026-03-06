@@ -742,7 +742,16 @@ func (v *VSHandler) setupForFinalSync(rsSpec *ramendrv1alpha1.VolSyncReplication
 
 	// Ensure the application PVC is deleted before proceeding with final sync
 	if !util.ResourceIsDeleted(pvc) {
-		v.log.Info("Final sync will not run until PVC is deleted", "namespace", pvc.Namespace, "name", pvc.Name)
+		// PVC is not being deleted yet - initiate deletion
+		// The app should already be quiesced at this point (checked in validatePVCForFinalSync)
+		// The PVC has a finalizer that will keep it around until we complete the final sync setup
+		if err := v.client.Delete(v.ctx, pvc); err != nil {
+			v.log.Error(err, "Failed to delete PVC for final sync", "pvcName", pvc.Name)
+
+			return stop
+		}
+
+		v.log.Info("Initiated PVC deletion for final sync", "namespace", pvc.Namespace, "name", pvc.Name)
 
 		return stop
 	}
