@@ -7,5 +7,5 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - configmap.yaml
-  - pvc.yaml
   - deployment.yaml
+  # PVC is managed by Ramen DR, not the subscription
