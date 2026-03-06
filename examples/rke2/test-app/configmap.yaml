@@ -105,15 +105,8 @@ data:
       echo "$(now_iso) WRITE seq=${WRITE_COUNT} host=$(hostname)" >> "${TIMESTAMP_FILE}"
 
       # Update state file (atomic write)
-      cat > "${STATE_FILE}.tmp" << EOF
-{
-  "last_write_sec": ${CURRENT_SEC},
-  "last_write_iso": "$(now_iso)",
-  "hostname": "$(hostname)",
-  "instance_start_sec": ${INSTANCE_START},
-  "write_count": ${WRITE_COUNT}
-}
-EOF
+      printf '{"last_write_sec":%d,"last_write_iso":"%s","hostname":"%s","instance_start_sec":%d,"write_count":%d}\n' \
+        "${CURRENT_SEC}" "$(now_iso)" "$(hostname)" "${INSTANCE_START}" "${WRITE_COUNT}" > "${STATE_FILE}.tmp"
       mv "${STATE_FILE}.tmp" "${STATE_FILE}"
 
       # Print status every 10 writes
