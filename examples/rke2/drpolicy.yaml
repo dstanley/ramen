@@ -11,7 +11,7 @@ metadata:
 spec:
   # List of DRCluster names participating in this policy
   drClusters:
-    - cluster1
-    - cluster2
+    - harv
+    - marv
   # Replication scheduling interval (for VolSync)
   schedulingInterval: "5m"

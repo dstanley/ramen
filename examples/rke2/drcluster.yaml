@@ -5,25 +5,22 @@
 # DRCluster resources for RKE2 clusters
 # Create one DRCluster resource per managed cluster on the hub
 
-# Primary cluster
+# Primary cluster (Harvester 1)
 apiVersion: ramendr.openshift.io/v1alpha1
 kind: DRCluster
 metadata:
-  name: cluster1
+  name: harv
 spec:
   # S3 profile for storing cluster data
   s3ProfileName: "minio-on-hub"
   # Optional: specify region for sync DR
   region: "east"
-  # Cluster network CIDRs (update with your cluster's values)
-  # clusterFence: Unfenced
 ---
-# Secondary cluster
+# Secondary cluster (Harvester 2)
 apiVersion: ramendr.openshift.io/v1alpha1
 kind: DRCluster
 metadata:
-  name: cluster2
+  name: marv
 spec:
   s3ProfileName: "minio-on-hub"
   region: "west"
-  # clusterFence: Unfenced
