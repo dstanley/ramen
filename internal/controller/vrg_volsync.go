@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ramendrv1alpha1 "github.com/ramendr/ramen/api/v1alpha1"
 	"github.com/ramendr/ramen/internal/controller/cephfscg"
@@ -938,6 +939,33 @@ func (v *VRGInstance) cleanupResources() error {
 
 		if err := v.doCleanupResources(protectedPVC.Name, protectedPVC.Namespace); err != nil {
 			return err
+		}
+
+		// Also remove finalizer from RDSpec PVCs (fix for Secondary VRG cleanup)
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcKey := types.NamespacedName{Name: protectedPVC.Name, Namespace: protectedPVC.Namespace}
+
+		if err := v.reconciler.Client.Get(v.ctx, pvcKey, pvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				v.log.Info("PVC not found during cleanup, skipping finalizer removal", "pvc", pvcKey)
+
+				continue
+			}
+
+			return err
+		}
+
+		if controllerutil.ContainsFinalizer(pvc, volsync.PVCFinalizerProtected) {
+			err := util.NewResourceUpdater(pvc).
+				RemoveFinalizer(volsync.PVCFinalizerProtected).
+				Update(v.ctx, v.reconciler.Client)
+			if err != nil {
+				v.log.Info("Failed to remove finalizer from RDSpec PVC", "pvcName", pvc.GetName(), "error", err)
+
+				return err
+			}
+
+			v.log.Info("Removed finalizer from RDSpec PVC", "pvcName", pvc.GetName())
 		}
 	}
 
