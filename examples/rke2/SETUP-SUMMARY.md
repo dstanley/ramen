@@ -1,19 +1,20 @@
 # Ramen DR Setup on RKE2/Harvester - Summary
 
 This document summarizes the steps to deploy Ramen DR with:
-- **Hub cluster**: RKE2 on Proxmox VMs
-- **Managed clusters**: Two Harvester clusters (harv, marv)
+- **Hub cluster**: RKE2 on Hosted VMs
+- **Managed clusters**: Two Harvester clusters (harv, marv in this example)
 
 ## Prerequisites
 
 - RKE2 cluster for hub
 - Two Harvester clusters for DR
 - Container registry accessible from all clusters
-- Proxmox VMs with CPU type set to `host` (for x86-64-v2 support)
+- If using VMs, set CPU type to `host` (for x86-64-v2 support)
+- Kubie for helper scripts
 
-## 1. Build Ramen Operator Image
+## 1. Build Ramen Operator Image 
 
-### Build for amd64 (from Apple Silicon Mac)
+### Build for amd64 (from Apple Silicon Mac if needed)
 
 ```bash
 # Enable Rosetta in Rancher Desktop
@@ -30,57 +31,14 @@ docker buildx build --platform linux/amd64 -t registry.192.168.7.68.nip.io/ramen
 ### Push to Registry (with self-signed cert)
 
 ```bash
-# Using skopeo to bypass TLS issues
+# Used skopeo to bypass TLS issues (test lab)
 docker save registry.192.168.7.68.nip.io/ramen-operator:dev -o ramen-operator.tar
 skopeo copy --dest-tls-verify=false docker-archive:ramen-operator.tar docker://registry.192.168.7.68.nip.io/ramen-operator:dev
 rm ramen-operator.tar
 ```
 
-## 2. Configure RKE2 Nodes for Insecure Registry
 
-Create script to update all nodes:
-
-```bash
-#!/bin/bash
-# update-rke2-registry.sh
-SSH_USER="${1:-root}"
-REGISTRY="registry.192.168.7.68.nip.io"
-
-NODES=(
-    "rke2-master1:192.168.7.79:server"
-    "rke2-master2:192.168.7.67:server"
-    "rke2-master3:192.168.7.80:server"
-    "rke2-worker1:192.168.7.68:agent"
-    "rke2-worker2:192.168.7.69:agent"
-    "rke2-longhorn1:192.168.7.70:agent"
-    "rke2-longhorn2:192.168.7.71:agent"
-    "rke2-longhorn3:192.168.7.72:agent"
-)
-
-REGISTRIES_YAML="mirrors:
-  \"${REGISTRY}\":
-    endpoint:
-      - \"https://${REGISTRY}\"
-configs:
-  \"${REGISTRY}\":
-    tls:
-      insecure_skip_verify: true"
-
-for node_entry in "${NODES[@]}"; do
-    IFS=':' read -r name ip type <<< "$node_entry"
-    echo "=== Configuring $name ($ip) ==="
-    ssh "${SSH_USER}@${ip}" "sudo mkdir -p /etc/rancher/rke2 && echo '${REGISTRIES_YAML}' | sudo tee /etc/rancher/rke2/registries.yaml"
-    if [ "$type" = "server" ]; then
-        ssh "${SSH_USER}@${ip}" "sudo systemctl restart rke2-server"
-    else
-        ssh "${SSH_USER}@${ip}" "sudo systemctl restart rke2-agent"
-    fi
-done
-```
-
-Run: `./update-rke2-registry.sh root`
-
-## 3. Install OCM Hub
+## 2. Install OCM Hub
 
 **IMPORTANT**: Use clusteradm **v0.11.2** - newer versions removed the `application-manager` addon which is required for ManagedClusterView support.
 
@@ -103,9 +61,9 @@ kubectl get pods -n open-cluster-management
 kubectl get pods -n open-cluster-management-hub
 ```
 
-## 4. Install OCM CRDs (Required by Ramen)
+## 3. Install OCM CRDs (Required by Ramen)
 
-Ramen requires several OCM CRDs that are bundled in the repo:
+Ramen requires several OCM CRDs that are bundled in the ramen repo:
 
 ```bash
 # ManagedClusterView CRD
@@ -115,11 +73,11 @@ kubectl apply -f hack/test/view.open-cluster-management.io_managedclusterviews.y
 kubectl apply -f hack/test/apps.open-cluster-management.io_placementrules_crd.yaml
 ```
 
-## 5. Install OCM Addons for ManagedClusterView Support
+## 4. Install OCM Addons for ManagedClusterView Support
 
 ManagedClusterView (MCV) allows the hub to read resources from managed clusters. This requires specific addons.
 
-### 5.1 Install application-manager Hub Addon
+### 4.1 Install application-manager Hub Addon
 
 ```bash
 # Must use clusteradm v0.11.2 for this command
@@ -135,7 +93,7 @@ Expected pods:
 - multicluster-operators-appsub-summary
 - multicluster-operators-placementrule
 
-### 5.2 Install work-manager ClusterManagementAddOn
+### 4.2 Install work-manager ClusterManagementAddOn
 
 Clone multicloud-operators-foundation and apply the work-manager addon:
 
@@ -160,7 +118,7 @@ kubectl get clustermanagementaddon
 # Should show: application-manager and work-manager
 ```
 
-## 6. Deploy Ramen Hub Operator
+## 5. Deploy Ramen Hub Operator
 
 ```bash
 make deploy-hub IMG=registry.192.168.7.68.nip.io/ramen-operator:dev PLATFORM=k8s
@@ -169,7 +127,7 @@ make deploy-hub IMG=registry.192.168.7.68.nip.io/ramen-operator:dev PLATFORM=k8s
 kubectl get pods -n ramen-system
 ```
 
-## 7. Deploy MinIO for S3 Storage
+## 6. Deploy MinIO for S3 Storage
 
 ```bash
 kubectl apply -f examples/rke2/minio.yaml
@@ -183,7 +141,7 @@ kubectl -n minio-system run mc-create-bucket --rm -it --restart=Never \
   --command -- /bin/sh -c "mc alias set myminio http://minio.minio-system.svc.cluster.local:9000 minioadmin minioadmin && mc mb --ignore-existing myminio/ramen"
 ```
 
-## 8. Configure Ramen Hub
+## 7. Configure Ramen Hub
 
 ```bash
 # Create S3 secret
@@ -202,9 +160,9 @@ kubectl rollout restart deployment -n ramen-system ramen-hub-operator
 kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager --tail=20
 ```
 
-## 9. Join Managed Clusters (Harvester)
+## 8. Join Managed Clusters (Harvester)
 
-### 9.1 Prepare kubeconfigs
+### 8.1 Prepare kubeconfigs
 
 Export kubeconfigs from Harvester clusters. Use `insecure-skip-tls-verify: true`:
 
@@ -229,13 +187,16 @@ contexts:
 current-context: "harv"
 ```
 
-### 9.2 Join clusters to hub
+### 8.2 Join clusters to hub
 
 ```bash
 # Get join token from hub
 clusteradm get token
 
 # Join harv (run with harv kubeconfig context)
+
+Replace with your specific ip's as appropriate.
+
 kubie ctx harv
 clusteradm join --hub-token <token> --hub-apiserver https://192.168.7.79:6443 --cluster-name harv --wait
 
@@ -262,45 +223,18 @@ harv   true                                  True     True        10m
 marv   true                                  True     True        6m
 ```
 
-## 10. Configure Harvester Nodes for Insecure Registry
+## 9. Check Harvester Nodes have access to registry
 
-```bash
-./examples/rke2/update-harvester-registry.sh rancher
-```
 
-Or manually:
-
-```bash
-SSH_USER="rancher"
-NODES=("harv:192.168.7.250" "marv:192.168.7.25")
-
-for node_entry in "${NODES[@]}"; do
-    IFS=':' read -r name ip <<< "$node_entry"
-    ssh "${SSH_USER}@${ip}" bash -s <<'EOF'
-        sudo mkdir -p /etc/rancher/rke2
-        cat << 'YAML' | sudo tee /etc/rancher/rke2/registries.yaml
-mirrors:
-  "registry.192.168.7.68.nip.io":
-    endpoint:
-      - "https://registry.192.168.7.68.nip.io"
-configs:
-  "registry.192.168.7.68.nip.io":
-    tls:
-      insecure_skip_verify: true
-YAML
-        sudo systemctl restart rke2-server
-EOF
-done
-```
-
-## 11. Install Required CRDs on Managed Clusters
+## 10. Install Required CRDs on Managed Clusters
 
 Ramen requires several CRDs on managed clusters for the DR cluster operator to function.
 
-### 11.1 CSI Addon CRDs
+### 10.1 CSI Addon CRDs
 
 ```bash
-# Apply to both harv and marv
+# Apply to both harv and marv (test clusters in this example)
+
 for cluster in harv marv; do
   echo "=== Applying CRDs to $cluster ==="
   kubie exec $cluster default kubectl apply -f hack/test/replication.storage.openshift.io_volumereplicationclasses.yaml
@@ -316,7 +250,7 @@ for cluster in harv marv; do
 done
 ```
 
-### 11.2 ManagedServiceAccount CRD (Required for OCM addons)
+### 10.2 ManagedServiceAccount CRD (Required for OCM addons)
 
 ```bash
 MSA_CRD="https://raw.githubusercontent.com/stolostron/managed-serviceaccount/main/config/crd/bases/authentication.open-cluster-management.io_managedserviceaccounts.yaml"
@@ -325,7 +259,9 @@ kubie exec harv default kubectl apply -f "$MSA_CRD"
 kubie exec marv default kubectl apply -f "$MSA_CRD"
 ```
 
-## 12. Deploy DR Cluster Operator on Managed Clusters
+## 11. Deploy DR Cluster Operator on Managed Clusters
+
+Installs the cluster operator on to the downstream harvester nodes.
 
 ```bash
 # On harv
@@ -341,7 +277,9 @@ kubie exec harv default kubectl get pods -n ramen-system
 kubie exec marv default kubectl get pods -n ramen-system
 ```
 
-## 13. Install VolSync on Managed Clusters
+## 12. Install VolSync on Managed Clusters
+
+These commands handle the installation of VolSync, the data mover that Ramen uses to replicate the PVCs between Harvester clusters.
 
 ```bash
 # Install via Helm
@@ -356,7 +294,7 @@ kubie exec harv default kubectl get pods -n volsync-system
 kubie exec marv default kubectl get pods -n volsync-system
 ```
 
-## 13a. Configure StorageClass and VolumeSnapshotClass Labels (Critical!)
+## 12a. Configure StorageClass and VolumeSnapshotClass Labels (Critical!)
 
 **This step is required for VolSync async replication to work.**
 
@@ -385,7 +323,7 @@ for cluster in harv marv; do
 done
 ```
 
-## 13b. Install Submariner (Optional but Recommended)
+## 12b. Install Submariner (Optional but Recommended)
 
 Submariner provides secure cross-cluster networking. Without it, VolSync uses LoadBalancer services which may not work in all environments.
 
@@ -416,12 +354,18 @@ This creates a `broker-info.subm` file containing connection details.
 
 ```bash
 # Join harv cluster (specify CIDRs to avoid auto-discovery issues)
+
+Edit CIDRs to match your environment.
+
 KUBECONFIG=/path/to/harv_kubeconfig.yaml subctl join broker-info.subm \
   --clusterid harv \
   --clustercidr 10.52.0.0/16 \
   --servicecidr 10.53.0.0/16
 
 # Join marv cluster
+
+Edit CIDRs to match your environment.
+
 KUBECONFIG=/path/to/marv_kubeconfig.yaml subctl join broker-info.subm \
   --clusterid marv \
   --clustercidr 10.48.0.0/16 \
@@ -446,7 +390,7 @@ KUBECONFIG=/path/to/harv_kubeconfig.yaml subctl diagnose all
 
 Expected output shows connected gateways with low latency (~4ms for local network).
 
-## 14. Create ClusterClaim Resources on Managed Clusters
+## 13. Create ClusterClaim Resources on Managed Clusters
 
 Each managed cluster needs a ClusterClaim to identify itself:
 
@@ -462,7 +406,7 @@ kubie exec harv default kubectl get clusterclaim
 kubie exec marv default kubectl get clusterclaim
 ```
 
-## 15. Enable OCM Addons on Managed Clusters
+## 14. Enable OCM Addons on Managed Clusters
 
 Back on the hub, enable the addons for the managed clusters:
 
@@ -482,7 +426,7 @@ Expected pods on each managed cluster:
 - application-manager
 - klusterlet-addon-workmgr (this processes ManagedClusterView!)
 
-## 16. Create DRCluster and DRPolicy Resources
+## 15. Create DRCluster and DRPolicy Resources
 
 On the hub cluster:
 
@@ -546,25 +490,14 @@ kubie exec harv default kubectl get pods -n open-cluster-management-agent-addon 
 
 If the dr-cluster operator crashes with CRD errors, ensure all CSI addon CRDs are installed (see step 11.1).
 
-### Proxmox VM CPU Issues
+### VM CPU Issues
 
-If pods fail with "CPU does not support x86-64-v2":
+If pods fail with "CPU does not support x86-64-v2" and using proxmox:
 1. Proxmox UI -> VM -> Hardware -> Processors -> Edit -> Type: `host`
 2. Reboot VM
 
-### RKE2 Node Network Issues
+In Harvester make sure the cpu model is set to host-passthrough
 
-If nodes have no default route after reboot:
-```bash
-ssh user@node "sudo ip route add default via 192.168.7.1"
-ssh user@node "echo 'default 192.168.7.1 - -' | sudo tee /etc/sysconfig/network/routes"
-```
-
-### DNS Issues on Nodes
-
-```bash
-ssh user@node "echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf"
-```
 
 ### S3 Bucket Not Found
 
@@ -1089,7 +1022,7 @@ Test environment: RKE2 hub + 2 Harvester clusters, VolSync rsync-tls over Submar
 
 ### Failover (harv → marv)
 - **RTO**: ~52 seconds (from DRPC Failover trigger to app running on marv)
-- **RPO**: ~6.5 minutes (data loss window based on VolSync sync interval)
+- **RPO**: ~5.5 minutes (data loss window based on VolSync sync interval)
 
 ### Failback/Relocate (marv → harv)
 - **RTO**: Higher due to final sync requirement
