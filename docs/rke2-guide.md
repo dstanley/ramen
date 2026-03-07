@@ -90,6 +90,42 @@ On the hub cluster:
 clusteradm accept --clusters <cluster1-name>,<cluster2-name>
 ```
 
+#### Install OCM Governance Policy Framework
+
+The governance policy framework is required for Ramen to propagate VolSync
+secrets between clusters. Without it, you must manually copy secrets.
+
+On the hub cluster:
+
+```bash
+# Install the policy framework hub addon
+clusteradm install hub-addon --names governance-policy-framework
+
+# Enable governance-policy-framework on managed clusters
+clusteradm addon enable --names governance-policy-framework \
+  --clusters <cluster1-name>,<cluster2-name>
+
+# Enable config-policy-controller on managed clusters
+clusteradm addon enable --names config-policy-controller \
+  --clusters <cluster1-name>,<cluster2-name>
+```
+
+Verify the addons are available:
+
+```bash
+kubectl get managedclusteraddons -A | grep -E "policy|config"
+```
+
+Expected output:
+
+```
+NAMESPACE    NAME                          AVAILABLE   DEGRADED   PROGRESSING
+cluster1     config-policy-controller      True                   False
+cluster1     governance-policy-framework   True                   False
+cluster2     config-policy-controller      True                   False
+cluster2     governance-policy-framework   True                   False
+```
+
 #### Verify OCM Setup
 
 ```bash
@@ -475,6 +511,32 @@ kubectl get managedclusters
 
 # Check ManifestWork status
 kubectl get manifestwork -A
+```
+
+### Policy Framework Issues
+
+If VolSync secrets are not being propagated automatically:
+
+```bash
+# Verify Policy CRDs exist on hub
+kubectl get crd | grep -E "policies.policy.open-cluster-management|placementbindings"
+
+# Check if policy addons are available
+kubectl get managedclusteraddons -A | grep -E "policy|config"
+
+# Check Policy resources in application namespace
+kubectl get policy -n <app-namespace>
+
+# Check hub operator logs for policy errors
+kubectl logs -n ramen-system deployment/ramen-hub-operator | grep -i policy
+```
+
+If Policy CRDs are missing, install the governance policy framework:
+
+```bash
+clusteradm install hub-addon --names governance-policy-framework
+clusteradm addon enable --names governance-policy-framework --clusters <cluster1>,<cluster2>
+clusteradm addon enable --names config-policy-controller --clusters <cluster1>,<cluster2>
 ```
 
 ## Differences from OpenShift

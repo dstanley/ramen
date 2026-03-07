@@ -208,6 +208,76 @@ install_ocm() {
 }
 
 # =============================================================================
+# PHASE: INSTALL OCM GOVERNANCE POLICY FRAMEWORK
+# =============================================================================
+
+install_policy_framework() {
+    log_info "=========================================="
+    log_info "Phase: Installing OCM Governance Policy Framework"
+    log_info "=========================================="
+
+    # Install policy framework hub addon
+    log_info "Installing governance-policy-framework hub addon..."
+    KUBECONFIG="$HUB_KUBECONFIG" clusteradm install hub-addon --names governance-policy-framework
+
+    # Wait for CRDs to be created
+    log_info "Waiting for Policy CRDs..."
+    sleep 10
+    local timeout=120
+    local elapsed=0
+    while [[ $elapsed -lt $timeout ]]; do
+        if KUBECONFIG="$HUB_KUBECONFIG" kubectl get crd policies.policy.open-cluster-management.io &>/dev/null; then
+            log_success "Policy CRDs installed"
+            break
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+
+    if [[ $elapsed -ge $timeout ]]; then
+        log_warn "Policy CRDs may still be installing..."
+    fi
+
+    # Enable governance-policy-framework on managed clusters
+    log_info "Enabling governance-policy-framework on managed clusters..."
+    KUBECONFIG="$HUB_KUBECONFIG" clusteradm addon enable \
+        --names governance-policy-framework \
+        --clusters dr1,dr2
+
+    # Enable config-policy-controller on managed clusters
+    log_info "Enabling config-policy-controller on managed clusters..."
+    KUBECONFIG="$HUB_KUBECONFIG" clusteradm addon enable \
+        --names config-policy-controller \
+        --clusters dr1,dr2
+
+    # Wait for addons to be available
+    log_info "Waiting for policy addons to be available..."
+    sleep 15
+    for cluster in dr1 dr2; do
+        local timeout=120
+        local elapsed=0
+        while [[ $elapsed -lt $timeout ]]; do
+            local available
+            available=$(KUBECONFIG="$HUB_KUBECONFIG" kubectl get managedclusteraddon \
+                governance-policy-framework -n "$cluster" \
+                -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "")
+            if [[ "$available" == "True" ]]; then
+                log_success "Policy framework available on $cluster"
+                break
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+        done
+
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "Policy framework addon may still be starting on $cluster"
+        fi
+    done
+
+    log_success "OCM Governance Policy Framework installation complete"
+}
+
+# =============================================================================
 # PHASE: CONFIGURE LONGHORN
 # =============================================================================
 
@@ -816,6 +886,10 @@ verify_setup() {
     KUBECONFIG="$HUB_KUBECONFIG" kubectl get managedclusters || true
 
     echo ""
+    echo "=== OCM Policy Framework Addons ==="
+    KUBECONFIG="$HUB_KUBECONFIG" kubectl get managedclusteraddons -A | grep -E "NAME|policy|config" || true
+
+    echo ""
     echo "=== Ramen Hub Operator ==="
     KUBECONFIG="$HUB_KUBECONFIG" kubectl get pods -n "$RAMEN_NAMESPACE" -l app=ramen-hub || true
 
@@ -880,8 +954,9 @@ Usage: $0 [OPTIONS]
 
 Options:
   --phase PHASE    Run specific phase only. Available phases:
-                   ocm, longhorn, snapshotter, minio, velero, volsync,
-                   kubevirt, cdi, ramen, config, e2e-config, verify, all
+                   ocm, policy-framework, longhorn, snapshotter, minio,
+                   velero, volsync, kubevirt, cdi, ramen, config, e2e-config,
+                   verify, all
   --verify         Run verification only
   --help           Show this help message
 
@@ -962,6 +1037,7 @@ main() {
     case $phase in
         all)
             install_ocm
+            install_policy_framework
             configure_longhorn
             install_snapshotter
             install_minio
@@ -976,6 +1052,9 @@ main() {
             ;;
         ocm)
             install_ocm
+            ;;
+        policy-framework)
+            install_policy_framework
             ;;
         longhorn)
             configure_longhorn
