@@ -256,6 +256,7 @@ EOF
     wait_for_pvc "$primary_cluster"
 
     # Create Placement
+    # Note: The disable annotation is required for Ramen to manage scheduling
     log "Creating Placement..."
     kubectl --context "$HUB_CONTEXT" apply -f - <<EOF
 apiVersion: cluster.open-cluster-management.io/v1beta1
@@ -263,6 +264,8 @@ kind: Placement
 metadata:
   name: $PLACEMENT_NAME
   namespace: $NAMESPACE
+  annotations:
+    cluster.open-cluster-management.io/experimental-scheduling-disable: "true"
 spec:
   clusterSets:
   - default
