@@ -379,13 +379,31 @@ OCM Subscriptions provide GitOps-style application deployment with automatic clu
 4. Subscription controller watches PlacementDecision and creates ManifestWorks for selected clusters
 5. Klusterlet work-agent on each managed cluster applies the manifests
 
-**Why Subscription is Recommended for DR:**
+**How Subscription Interacts with PlacementDecision Changes:**
 
 When Ramen updates the PlacementDecision during failover:
-- The subscription controller **automatically detects** the PlacementDecision change
-- It **automatically creates** new ManifestWorks to deploy the application on the new cluster
-- It **automatically cleans up** the application from the old cluster
-- **No manual intervention required**
+- The subscription controller **detects** the PlacementDecision change
+- When a **new cluster is added** to decisions, it **automatically creates** ManifestWorks to deploy the application
+- **Application deployment on new primary is automatic**
+
+**⚠️ Known Limitation: Source Cluster Cleanup During Relocate**
+
+During relocate operations, Ramen temporarily empties the PlacementDecision to quiesce the application on the source cluster. However:
+
+1. The subscription controller **does NOT remove** the ManifestWork when PlacementDecision becomes empty
+2. The application keeps running on the source cluster, preventing PVC final sync
+3. **Manual intervention may be required** to delete the ManifestWork from the source cluster namespace on the hub
+
+**Workaround for Relocate:**
+```bash
+# If relocate is stuck at RunningFinalSync, check for orphaned ManifestWork
+kubectl get manifestwork -n <source-cluster-namespace> | grep <app-name>
+
+# Delete the orphaned ManifestWork to allow application cleanup
+kubectl delete manifestwork <app-manifestwork-name> -n <source-cluster-namespace>
+```
+
+This is expected behavior per OCM design - the subscription controller is designed for GitOps workflows where the subscription lifecycle manages the app lifecycle. For DR, Ramen manipulates the PlacementDecision rather than the subscription, which doesn't trigger automatic cleanup.
 
 ### Model 2: ArgoCD ApplicationSet
 
@@ -472,7 +490,9 @@ When Ramen updates the PlacementDecision:
 - **Application must be manually deployed** ❌
 - Failover is **incomplete** until user deploys the application
 
-### Comparison: Failover Behavior by Deployment Model
+### Comparison: Failover vs Relocate Behavior by Deployment Model
+
+#### Failover (Source cluster unavailable)
 
 | Step | OCM Subscription | ArgoCD ApplicationSet | ManifestWork Only |
 |------|------------------|----------------------|-------------------|
@@ -480,12 +500,28 @@ When Ramen updates the PlacementDecision:
 | VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic |
 | PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic |
 | Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
-| Application removed from source | ✓ Automatic | ✓ Automatic | ❌ Manual |
 | Failover completes without intervention | ✓ Yes | ✓ Yes | ❌ No |
+
+#### Relocate (Both clusters available, requires final sync)
+
+| Step | OCM Subscription | ArgoCD ApplicationSet | ManifestWork Only |
+|------|------------------|----------------------|-------------------|
+| Ramen empties PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application removed from source | ⚠️ **Manual** (see note) | ✓ Automatic | ❌ Manual |
+| Final sync completes | ✓ After cleanup | ✓ Automatic | ⚠️ May block |
+| VRG created on target | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Relocate completes without intervention | ⚠️ May need manual cleanup | ✓ Yes | ❌ No |
+
+**⚠️ OCM Subscription Note:** The subscription controller does not automatically remove ManifestWork when PlacementDecision becomes empty. During relocate, you may need to manually delete the app ManifestWork from the source cluster namespace on the hub to allow the final sync to complete.
 
 ### Recommendation
 
-**For production DR, use OCM Subscription or ArgoCD ApplicationSet** to ensure fully automatic failover. If using ManifestWork-only deployment, be prepared to manually deploy applications after failover.
+**For production DR with relocate support:** Consider ArgoCD ApplicationSet as it handles both failover and relocate automatically.
+
+**For failover-only scenarios:** OCM Subscription works well - the application is automatically deployed to the target cluster.
+
+**If using ManifestWork-only deployment:** Be prepared to manually deploy applications and clean up the source during DR operations.
 
 ### How Ramen Detects Deployment Model
 
