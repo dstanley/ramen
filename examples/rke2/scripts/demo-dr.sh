@@ -249,7 +249,7 @@ spec:
         resources:
           requests:
             storage: 1Gi
-        storageClassName: longhorn
+        storageClassName: harvester-longhorn
 EOF
 
     # Wait for PVC
