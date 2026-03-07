@@ -163,6 +163,13 @@ func (v *VRGInstance) reconcilePVCAsVolSyncPrimary(pvc corev1.PersistentVolumeCl
 		return true
 	}
 
+	// If PVC is being deleted, protectedPVC will be nil - skip processing
+	if protectedPVC == nil {
+		v.log.Info("Skipping PVC being deleted", "pvc", pvc.Name)
+
+		return false
+	}
+
 	if util.IsSubmarinerEnabled(v.instance.GetAnnotations()) {
 		rsSpec = ramendrv1alpha1.VolSyncReplicationSourceSpec{
 			ProtectedPVC: *protectedPVC,
