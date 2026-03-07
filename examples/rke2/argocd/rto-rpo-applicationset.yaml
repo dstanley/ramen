@@ -48,11 +48,10 @@ spec:
       project: dr-apps
 
       # Source: Ramen repository test-app directory
-      # Note: This requires the test-app to be pushed to a branch
-      # For local testing, you can use a different repo or argocd-autopilot
+      # Update repoURL and targetRevision to match your fork/branch
       sources:
-      - repoURL: https://github.com/RamenDR/ramen.git
-        targetRevision: main
+      - repoURL: https://github.com/dstanley/ramen.git
+        targetRevision: ramen_rke2_longhorn
         path: examples/rke2/test-app
         directory:
           recurse: false
