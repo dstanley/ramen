@@ -79,6 +79,41 @@ OCM provides the multi-cluster management foundation. On the hub, several contro
 | **cluster-manager-work-webhook** | Validates ManifestWork resources |
 | **cluster-manager-addon-manager-controller** | Manages addon lifecycle across managed clusters |
 
+#### OCM Governance Policy Framework (Required for VolSync)
+
+The governance policy framework enables Ramen to propagate VolSync secrets between clusters automatically.
+
+**Namespace:** `open-cluster-management-hub`
+
+| Component | Description |
+|-----------|-------------|
+| **governance-policy-propagator** | Propagates Policy resources to managed clusters via ManifestWork |
+
+**Custom Resources:**
+
+| CRD | API Group | Description |
+|-----|-----------|-------------|
+| **Policy** | `policy.open-cluster-management.io/v1` | Defines a policy containing objects to enforce on managed clusters |
+| **PlacementBinding** | `policy.open-cluster-management.io/v1` | Binds a Policy to a Placement/PlacementRule for cluster selection |
+
+**Why This is Required:**
+
+Ramen uses OCM Policy to propagate VolSync PSK (Pre-Shared Key) secrets to managed clusters. Without the governance policy framework:
+- VolSync secrets must be manually copied to each cluster
+- DRPC will show errors: `no matches for kind "Policy" in version "policy.open-cluster-management.io/v1"`
+- Replication will fail until secrets are manually created
+
+**Installation:**
+
+```bash
+# Install on hub
+clusteradm install hub-addon --names governance-policy-framework
+
+# Enable on managed clusters
+clusteradm addon enable --names governance-policy-framework --clusters <cluster1>,<cluster2>
+clusteradm addon enable --names config-policy-controller --clusters <cluster1>,<cluster2>
+```
+
 ### Ramen Hub Operator
 
 **Namespace:** `ramen-system`
@@ -91,7 +126,7 @@ The Ramen hub operator runs on the hub cluster and manages DR at the policy leve
 |------------|---------|-----------------|---------|
 | **DRCluster Controller** | DRCluster | ManifestWork, ManagedClusterView | Validates clusters, deploys DRClusterConfig to managed clusters, reads cluster capabilities via MCV |
 | **DRPolicy Controller** | DRPolicy | - | Validates that referenced DRClusters are healthy and compatible |
-| **DRPlacementControl Controller** | DRPlacementControl | VolumeReplicationGroup (via ManifestWork) | Orchestrates failover/relocate operations |
+| **DRPlacementControl Controller** | DRPlacementControl | VolumeReplicationGroup (via ManifestWork), Policy (for VolSync secrets) | Orchestrates failover/relocate operations, propagates VolSync PSK secrets via OCM Policy |
 
 #### Custom Resources (Hub)
 
@@ -133,6 +168,10 @@ The klusterlet is the OCM agent that runs on each managed cluster.
 |-----------|-------------|
 | **application-manager** | Processes Subscription resources for GitOps deployments |
 | **klusterlet-addon-workmgr** | **Critical for Ramen**: Processes ManagedClusterView requests from the hub |
+| **governance-policy-framework** | **Required for VolSync**: Syncs Policy resources from hub, creates local policy objects |
+| **config-policy-controller** | **Required for VolSync**: Enforces ConfigurationPolicy resources (creates/updates secrets) |
+
+**Note:** Without `governance-policy-framework` and `config-policy-controller`, VolSync PSK secrets will not be automatically propagated to managed clusters.
 
 ### Ramen DR Cluster Operator
 
@@ -284,6 +323,192 @@ With Submariner:
 
 ---
 
+## OCM Application Deployment Models
+
+Ramen supports applications deployed via different OCM deployment models. Understanding these models is critical because **how your application is deployed determines whether failover completes automatically or requires manual intervention**.
+
+### Model 1: OCM Subscription/Channel (Recommended for DR)
+
+OCM Subscriptions provide GitOps-style application deployment with automatic cluster placement.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Hub Cluster                                     │
+│                                                                              │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────────────────────┐    │
+│  │   Channel   │────>│Subscription │────>│      PlacementRule/         │    │
+│  │  (Git repo) │     │ (selects    │     │       Placement             │    │
+│  │             │     │  packages)  │     │  (selects target clusters)  │    │
+│  └─────────────┘     └──────┬──────┘     └──────────────┬──────────────┘    │
+│                             │                           │                    │
+│                             │                           ▼                    │
+│                             │              ┌─────────────────────────┐       │
+│                             │              │   PlacementDecision     │       │
+│                             │              │   (cluster: harv)       │       │
+│                             │              └───────────┬─────────────┘       │
+│                             │                          │                     │
+│                             ▼                          ▼                     │
+│                    subscription-controller watches PlacementDecision         │
+│                    and deploys to selected cluster                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ ManifestWork (app resources)
+                                    ▼
+                           ┌─────────────────┐
+                           │  Managed Cluster │
+                           │     (harv)       │
+                           │                  │
+                           │  [Application]   │
+                           └─────────────────┘
+```
+
+**Key Components:**
+
+| Resource | Purpose |
+|----------|---------|
+| **Channel** | Points to a source repository (Git, Helm, ObjectBucket, or Namespace) containing deployable content |
+| **Subscription** | Selects what to deploy from a Channel (package filters, version) and references a Placement |
+| **Placement/PlacementRule** | Defines criteria for selecting target clusters (labels, claims, etc.) |
+| **PlacementDecision** | Created by placement-controller; contains the actual list of selected clusters |
+
+**How Subscription Deployment Works:**
+
+1. User creates a Channel pointing to a Git repo with Kubernetes manifests
+2. User creates a Subscription referencing the Channel and a Placement
+3. Placement controller evaluates cluster criteria and creates a PlacementDecision
+4. Subscription controller watches PlacementDecision and creates ManifestWorks for selected clusters
+5. Klusterlet work-agent on each managed cluster applies the manifests
+
+**Why Subscription is Recommended for DR:**
+
+When Ramen updates the PlacementDecision during failover:
+- The subscription controller **automatically detects** the PlacementDecision change
+- It **automatically creates** new ManifestWorks to deploy the application on the new cluster
+- It **automatically cleans up** the application from the old cluster
+- **No manual intervention required**
+
+### Model 2: ArgoCD ApplicationSet
+
+ArgoCD ApplicationSets provide GitOps deployment with OCM Placement integration.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Hub Cluster                                     │
+│                                                                              │
+│  ┌──────────────────────┐     ┌─────────────────────────────┐               │
+│  │    ApplicationSet    │────>│      Placement              │               │
+│  │  (Git repo + template│     │  (selects target clusters)  │               │
+│  │   for Application)   │     └──────────────┬──────────────┘               │
+│  └──────────┬───────────┘                    │                              │
+│             │                                ▼                              │
+│             │                   ┌─────────────────────────┐                 │
+│             │                   │   PlacementDecision     │                 │
+│             │                   │   (cluster: harv)       │                 │
+│             │                   └───────────┬─────────────┘                 │
+│             │                               │                               │
+│             ▼                               ▼                               │
+│  ApplicationSet controller watches PlacementDecision                        │
+│  and creates Application resources for each cluster                         │
+│             │                                                               │
+│             ▼                                                               │
+│  ┌────────────────────┐                                                     │
+│  │    Application     │  (ArgoCD syncs to managed cluster)                  │
+│  │  (for cluster harv)│                                                     │
+│  └────────────────────┘                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**How ApplicationSet Deployment Works:**
+
+1. User creates an ApplicationSet with a ClusterDecisionResource generator pointing to a Placement
+2. Placement controller creates PlacementDecision with selected clusters
+3. ApplicationSet controller creates an Application resource for each cluster in PlacementDecision
+4. ArgoCD syncs each Application to its target cluster
+
+**DR Behavior:**
+
+When Ramen updates the PlacementDecision:
+- ApplicationSet controller **automatically creates** new Application for the new cluster
+- ArgoCD **automatically syncs** the application to the new cluster
+- **Automatic failover** - no manual intervention required
+
+### Model 3: ManifestWork Only (Manual Application Deployment)
+
+If your application is deployed directly via kubectl, Helm, or other methods without OCM Subscription or ArgoCD, Ramen cannot automatically move the application.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Hub Cluster                                     │
+│                                                                              │
+│  ┌─────────────────────────────┐                                            │
+│  │        Placement            │                                            │
+│  │  (selects target clusters)  │                                            │
+│  └──────────────┬──────────────┘                                            │
+│                 │                                                           │
+│                 ▼                                                           │
+│  ┌─────────────────────────┐                                                │
+│  │   PlacementDecision     │  <── Ramen updates this during failover        │
+│  │   (cluster: harv)       │                                                │
+│  └─────────────────────────┘                                                │
+│                 │                                                           │
+│                 ▼                                                           │
+│  ❌ No controller watching PlacementDecision for app deployment             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                    Managed Cluster (harv)
+                    ┌─────────────────────────────┐
+                    │  [VRG created by Ramen]     │  ✓ Automatic
+                    │  [PVCs restored]            │  ✓ Automatic
+                    │  [Application]              │  ❌ Manual deployment needed
+                    └─────────────────────────────┘
+```
+
+**DR Behavior:**
+
+When Ramen updates the PlacementDecision:
+- Ramen creates VRG via ManifestWork ✓
+- VRG restores PVCs from replication ✓
+- **Application must be manually deployed** ❌
+- Failover is **incomplete** until user deploys the application
+
+### Comparison: Failover Behavior by Deployment Model
+
+| Step | OCM Subscription | ArgoCD ApplicationSet | ManifestWork Only |
+|------|------------------|----------------------|-------------------|
+| Ramen updates PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Application removed from source | ✓ Automatic | ✓ Automatic | ❌ Manual |
+| Failover completes without intervention | ✓ Yes | ✓ Yes | ❌ No |
+
+### Recommendation
+
+**For production DR, use OCM Subscription or ArgoCD ApplicationSet** to ensure fully automatic failover. If using ManifestWork-only deployment, be prepared to manually deploy applications after failover.
+
+### How Ramen Detects Deployment Model
+
+Ramen determines the deployment model by examining the Placement reference:
+
+```go
+// Simplified logic from drplacementcontrol_controller.go
+func getVRGNamespace(placement) string {
+    // Check if an ApplicationSet references this Placement
+    appSets := listApplicationSets()
+    for appSet := range appSets {
+        if appSet.usesPlacement(placement) {
+            // ApplicationSet model: use destination namespace from AppSet
+            return appSet.Spec.Template.Spec.Destination.Namespace
+        }
+    }
+    // Subscription model (default): use Placement namespace
+    return placement.Namespace
+}
+```
+
+---
+
 ## DR Operation Flow
 
 ### Initial Protection (Deploy)
@@ -294,42 +519,280 @@ With Submariner:
 
 2. Hub DRPlacementControl controller:
    └─> Creates VolumeReplicationGroup via ManifestWork on primary cluster
+   └─> Creates VRG (secondary) via ManifestWork on secondary cluster
 
 3. Primary cluster VRG controller:
    └─> Creates ReplicationSource for each protected PVC
    └─> VolSync begins replicating data
 
-4. Secondary cluster receives ReplicationDestination
+4. Secondary cluster VRG controller:
+   └─> Creates ReplicationDestination for each protected PVC
    └─> VolSync creates destination PVCs with replicated data
+
+5. Hub updates DRPC status
+   └─> Phase: Deployed, PeerReady: True
 ```
 
 ### Failover
 
 ```
 1. User updates DRPlacementControl.spec.action = "Failover"
+   └─> Sets failoverCluster to target cluster
 
-2. Hub controller:
+2. Hub DRPC controller - Progression: FailingOverToCluster
    └─> Updates VRG on primary to Secondary role (if reachable)
-   └─> Creates/updates VRG on secondary to Primary role
+   └─> Updates VRG on target to Primary role via ManifestWork
 
-3. Secondary cluster:
-   └─> VRG controller promotes ReplicationDestination PVCs
-   └─> Workload can now run on secondary
+3. Target cluster VRG controller - Progression: WaitingForResourceRestore
+   └─> Promotes ReplicationDestination PVCs to regular PVCs
+   └─> Restores PV metadata from S3
+   └─> Restores application resources from S3 (if kubeObjectProtection enabled)
 
-4. Application is moved to secondary cluster
+4. Hub DRPC controller - Progression: UpdatingPlacement
+   └─> Updates PlacementDecision to point to target cluster
+   └─> This triggers application deployment (see deployment model)
+
+5. Application controller reacts (model-dependent):
+   ├─> OCM Subscription: subscription-controller deploys app to target
+   ├─> ArgoCD: ApplicationSet creates Application for target cluster
+   └─> ManifestWork only: ❌ NO AUTOMATIC DEPLOYMENT - manual intervention needed
+
+6. Hub DRPC controller - Progression: Completed
+   └─> Cleans up secondary VRG on source cluster
+   └─> Sets up replication in reverse direction
+```
+
+**Failover State Machine:**
+
+```
+Initiating
+    │
+    ▼
+FailingOverToCluster
+    │
+    ▼
+WaitingForResourceRestore  ──────────────┐
+    │                                    │
+    ▼                                    │ (VRG not ready, loop back)
+WaitForReadiness                         │
+    │                                    │
+    ├────────────────────────────────────┘
+    │
+    ▼
+UpdatingPlacement  ◄── PlacementDecision updated here
+    │
+    ▼
+Completed / CleaningUp
+    │
+    ▼
+SettingUpVolSyncDest  (reverse replication)
 ```
 
 ### Relocate (Planned Migration)
 
 ```
 1. User updates DRPlacementControl.spec.action = "Relocate"
+   └─> Sets failoverCluster to target cluster
 
-2. Hub controller:
-   └─> Ensures final sync from primary to secondary
-   └─> Demotes primary VRG
-   └─> Promotes secondary VRG
+2. Hub DRPC controller - Progression: PreparingFinalSync
+   └─> Ensures application is quiesced on source
+   └─> Triggers final sync via VRG
 
-3. Workload moves to secondary with no data loss
+3. Source cluster VRG controller - Progression: RunningFinalSync
+   └─> Initiates PVC deletion (triggers final VolSync)
+   └─> Waits for final sync to complete
+
+4. Hub DRPC controller - Progression: EnsuringVolumesAreSecondary
+   └─> Demotes source VRG to Secondary
+   └─> Waits for demotion to complete
+
+5. Hub DRPC controller - Progression: WaitingForResourceRestore
+   └─> Promotes target VRG to Primary
+   └─> Restores PVCs and app resources on target
+
+6. Hub DRPC controller - Progression: UpdatingPlacement
+   └─> Updates PlacementDecision to point to target cluster
+   └─> Application controller deploys to target (model-dependent)
+
+7. Hub DRPC controller - Progression: Completed
+   └─> Sets up replication in reverse direction
+```
+
+**Relocate State Machine:**
+
+```
+Initiating
+    │
+    ▼
+PreparingFinalSync
+    │
+    ▼
+RunningFinalSync  ◄── PVC deletion initiated here
+    │
+    ▼
+EnsuringVolumesAreSecondary
+    │
+    ▼
+WaitingForResourceRestore
+    │
+    ▼
+UpdatingPlacement  ◄── PlacementDecision updated here
+    │
+    ▼
+Completed / CleaningUp
+    │
+    ▼
+SettingUpVolSyncDest  (reverse replication)
+```
+
+### Common Issues by Deployment Model
+
+| Issue | Symptom | Cause | Solution |
+|-------|---------|-------|----------|
+| Failover stuck at WaitingForResourceRestore | VRG not becoming Primary | PVCs not restored, S3 access issue | Check VRG status, S3 connectivity |
+| Failover completes but app not running | DRPC shows Completed, no pods | ManifestWork-only deployment | Deploy app manually or use Subscription |
+| PlacementDecision not updating | DRPC stuck at UpdatingPlacement | Placement controller issue | Check placement-controller logs |
+| App deployed to wrong namespace | Pods in unexpected namespace | ApplicationSet namespace mismatch | Verify AppSet template destination |
+
+---
+
+## Example: Setting Up OCM Subscription for Automatic Failover
+
+This example shows how to set up an OCM Subscription-based deployment that will automatically failover with Ramen.
+
+### 1. Create a Channel (Git Repository)
+
+```yaml
+apiVersion: apps.open-cluster-management.io/v1
+kind: Channel
+metadata:
+  name: my-app-channel
+  namespace: my-app-channel-ns
+spec:
+  type: Git
+  pathname: https://github.com/example/my-app-manifests.git
+```
+
+### 2. Create a Placement
+
+```yaml
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: my-app-placement
+  namespace: my-app-ns
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/clusterset: dr-clusters
+  # Ramen will manage the cluster selection via PlacementDecision
+```
+
+### 3. Create a Subscription
+
+```yaml
+apiVersion: apps.open-cluster-management.io/v1
+kind: Subscription
+metadata:
+  name: my-app-subscription
+  namespace: my-app-ns
+  annotations:
+    apps.open-cluster-management.io/git-path: deploy/
+    apps.open-cluster-management.io/git-branch: main
+spec:
+  channel: my-app-channel-ns/my-app-channel
+  placement:
+    placementRef:
+      kind: Placement
+      name: my-app-placement
+```
+
+### 4. Create a DRPlacementControl
+
+```yaml
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: DRPlacementControl
+metadata:
+  name: my-app-drpc
+  namespace: my-app-ns
+spec:
+  preferredCluster: harv
+  drPolicyRef:
+    name: dr-policy
+  placementRef:
+    kind: Placement
+    name: my-app-placement
+  pvcSelector:
+    matchLabels:
+      app: my-app
+```
+
+### How It Works Together
+
+```
+1. Initial Deployment:
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ Placement → PlacementDecision (cluster: harv)                   │
+   │     ↓                                                           │
+   │ Subscription controller sees PlacementDecision                  │
+   │     ↓                                                           │
+   │ Creates ManifestWork to deploy app on harv                      │
+   │     ↓                                                           │
+   │ DRPC creates VRG on harv (Primary) and marv (Secondary)         │
+   └─────────────────────────────────────────────────────────────────┘
+
+2. After Failover (action: Failover, failoverCluster: marv):
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ DRPC promotes VRG on marv to Primary                            │
+   │     ↓                                                           │
+   │ DRPC updates PlacementDecision (cluster: marv)                  │
+   │     ↓                                                           │
+   │ Subscription controller detects PlacementDecision change        │
+   │     ↓                                                           │
+   │ Deletes ManifestWork for harv, creates ManifestWork for marv    │
+   │     ↓                                                           │
+   │ App automatically deployed on marv ✓                            │
+   └─────────────────────────────────────────────────────────────────┘
+```
+
+### Verifying Subscription Setup
+
+```bash
+# Check Channel
+kubectl get channel -A
+
+# Check Subscription
+kubectl get subscription -n my-app-ns
+
+# Check Placement and PlacementDecision
+kubectl get placement -n my-app-ns
+kubectl get placementdecision -n my-app-ns
+
+# After failover, verify PlacementDecision was updated
+kubectl get placementdecision -n my-app-ns -o yaml | grep -A5 decisions
+```
+
+### Required OCM Components
+
+For OCM Subscriptions to work, ensure these components are installed:
+
+**On Hub:**
+- `multicluster-operators-subscription` (from stolostron/multicloud-operators-subscription)
+- `multicluster-operators-channel`
+- `multicluster-operators-placementrule` (legacy) or placement-controller
+
+**On Managed Clusters:**
+- `application-manager` addon (from work-manager ClusterManagementAddOn)
+
+Verify with:
+```bash
+# Hub
+kubectl get pods -n open-cluster-management | grep -E "subscription|channel|placement"
+
+# Managed cluster
+kubectl get pods -n open-cluster-management-agent-addon | grep application-manager
 ```
 
 ---
@@ -402,6 +865,8 @@ With Submariner:
 | ManagedClusterView | OCM/stolostron | Ramen hub |
 | ManagedClusterAddOn | OCM | addon-manager |
 | ClusterManagementAddOn | OCM | addon-manager |
+| **Policy** | **OCM Governance** | **Ramen hub (VolSync secret propagation)** |
+| **PlacementBinding** | **OCM Governance** | **Ramen hub (binds Policy to clusters)** |
 | DRCluster | Ramen | ramen-hub-operator |
 | DRPolicy | Ramen | ramen-hub-operator |
 | DRPlacementControl | Ramen | ramen-hub-operator |
@@ -414,6 +879,7 @@ With Submariner:
 | AppliedManifestWork | OCM | klusterlet-work-agent |
 | ClusterClaim | OCM | klusterlet |
 | ManagedServiceAccount | stolostron | application-manager |
+| **ConfigurationPolicy** | **OCM Governance** | **config-policy-controller (enforces secrets)** |
 | DRClusterConfig | Ramen | ramen-dr-cluster-operator |
 | VolumeReplicationGroup | Ramen | ramen-dr-cluster-operator |
 | ReplicationSource | VolSync | volsync |
@@ -590,6 +1056,28 @@ kubectl get replicationdestination -A
 kubectl describe replicationsource -n <namespace> <name>
 ```
 
+### Check Policy Framework (VolSync Secret Propagation)
+
+```bash
+# Verify Policy CRDs exist on hub
+kubectl get crd | grep -E "policies.policy.open-cluster-management|placementbindings"
+
+# Check if policy addons are available on managed clusters
+kubectl get managedclusteraddons -A | grep -E "policy|config"
+
+# Check Policy resources for a DRPC (on hub)
+kubectl get policy -n <app-namespace>
+
+# Check if Policy shows Compliant (on hub)
+kubectl get policy -n <app-namespace> -o wide
+
+# Check hub operator logs for policy errors
+kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager | grep -i policy
+
+# Verify secret exists on managed cluster
+kubectl get secret <drpc-name>-vs-secret -n <app-namespace>
+```
+
 ### Common Issues
 
 | Symptom | Likely Cause | Check |
@@ -598,6 +1086,9 @@ kubectl describe replicationsource -n <namespace> <name>
 | VRG not created | ManifestWork not applied | `kubectl get manifestwork -n <cluster>` |
 | Data not replicating | VolSync misconfigured | `kubectl get replicationsource -A` |
 | Failover fails | S3 connectivity | Check S3 secret, bucket existence |
+| **VolSync secret not found** | **Policy CRDs missing** | **`kubectl get crd \| grep policies`** |
+| **Hub logs: "no matches for kind Policy"** | **governance-policy-framework not installed** | **`clusteradm install hub-addon --names governance-policy-framework`** |
+| **ReplicationDestination not created** | **PSK secret missing on secondary** | **Check policy compliance: `kubectl get policy -n <ns>`** |
 
 ---
 
