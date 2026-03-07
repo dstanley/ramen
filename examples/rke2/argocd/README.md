@@ -4,14 +4,36 @@ This directory contains scripts and manifests for setting up ArgoCD with OCM Pla
 
 ## Overview
 
-When using ArgoCD ApplicationSet with OCM Placement:
-1. ApplicationSet watches PlacementDecision for cluster changes
+When using ArgoCD ApplicationSet with Ramen DR:
+1. `argocd-dr-controller.sh` watches PlacementDecision for cluster changes
 2. When Ramen updates PlacementDecision during failover/relocate:
+   - Controller updates `ramen.dr/enabled` label on ArgoCD cluster secrets
+   - ArgoCD ApplicationSet detects label change
    - ArgoCD automatically removes Application from old cluster (prunes resources)
    - ArgoCD automatically creates Application for new cluster
    - ArgoCD syncs application to new cluster
 
 This provides **fully automatic application failover** without manual intervention.
+
+## Generator Options
+
+### Cluster Generator with Labels (Recommended)
+
+Uses `argocd-dr-controller.sh` to manage cluster labels based on PlacementDecision:
+
+```yaml
+generators:
+- clusters:
+    selector:
+      matchLabels:
+        ramen.dr/enabled: "true"
+```
+
+This approach works reliably because the controller bridges PlacementDecision changes to ArgoCD cluster labels.
+
+### ClusterDecisionResource Generator (Has Limitations)
+
+ArgoCD's ClusterDecisionResource generator can read PlacementDecisions directly, but has a known limitation: it only looks for PlacementDecisions in the argocd namespace, even with multi-namespace configuration. Since Ramen creates PlacementDecisions in the application namespace, this approach doesn't work reliably.
 
 ## Setup
 
@@ -60,16 +82,34 @@ kubectl get configmap acm-placement -n argocd --context rke2 -o yaml
 
 ## Usage
 
+### Start the DR Controller
+
+The controller manages ArgoCD cluster labels based on PlacementDecision changes:
+
+```bash
+# Start controller (runs in foreground)
+./argocd-dr-controller.sh
+
+# Or run in background
+nohup ./argocd-dr-controller.sh > /tmp/argocd-dr-controller.log 2>&1 &
+
+# With custom options
+./argocd-dr-controller.sh --namespace ramen-test --placement rto-rpo-test-placement
+```
+
 ### Deploy Application with ArgoCD
 
 ```bash
 # 1. Create DR resources (namespace, Placement, DRPC) using demo-dr.sh
 ../scripts/demo-dr.sh deploy harv --model argocd
 
-# 2. Apply the ApplicationSet
-kubectl apply -f rto-rpo-applicationset.yaml --context rke2
+# 2. Apply the ApplicationSet (uses Cluster generator)
+kubectl apply -f applicationset-cluster-generator.yaml --context rke2
 
-# 3. Check ArgoCD Applications
+# 3. Start the DR controller if not already running
+./argocd-dr-controller.sh &
+
+# 4. Check ArgoCD Applications
 kubectl get applications -n argocd --context rke2
 ```
 
@@ -116,7 +156,9 @@ ArgoCD handles relocate automatically:
 | File | Description |
 |------|-------------|
 | `setup-argocd-ocm.sh` | Script to configure ArgoCD with OCM integration |
-| `rto-rpo-applicationset.yaml` | ApplicationSet for test app with OCM Placement |
+| `argocd-dr-controller.sh` | Controller that manages cluster labels based on PlacementDecision |
+| `applicationset-cluster-generator.yaml` | ApplicationSet using Cluster generator (recommended) |
+| `rto-rpo-applicationset.yaml` | ApplicationSet using ClusterDecisionResource (has limitations) |
 | `applicationset-inline.yaml` | Alternative ApplicationSet examples |
 
 ## Troubleshooting
