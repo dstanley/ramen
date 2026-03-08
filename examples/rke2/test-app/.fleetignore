@@ -1,5 +1,9 @@
 # Files excluded from Fleet deployment
 #
+# Namespace excluded - demo-dr.sh creates the namespace before Fleet deploys.
+# Fleet (Helm) cannot adopt a namespace it didn't create.
+namespace.yaml
+
 # PVC excluded - Ramen manages PVC lifecycle during DR operations.
 # Including pvc.yaml causes dual ownership conflicts on failover.
 pvc.yaml
