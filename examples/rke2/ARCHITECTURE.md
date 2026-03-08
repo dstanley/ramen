@@ -103,6 +103,8 @@ Ramen uses OCM Policy to propagate VolSync PSK (Pre-Shared Key) secrets to manag
 - DRPC will show errors: `no matches for kind "Policy" in version "policy.open-cluster-management.io/v1"`
 - Replication will fail until secrets are manually created
 
+**Important:** A `ManagedClusterSetBinding` must exist in the application namespace for the PlacementRule controller to discover managed clusters. Without it, the Policy that propagates the PSK secret will never be placed on any cluster. See the `demo-dr.sh` script for an example.
+
 **Installation:**
 
 ```bash
@@ -449,6 +451,22 @@ When Ramen updates the PlacementDecision:
 - ApplicationSet controller **automatically creates** new Application for the new cluster
 - ArgoCD **automatically syncs** the application to the new cluster
 - **Automatic failover** - no manual intervention required
+
+**⚠️ Critical: PVC Ownership**
+
+The ApplicationSet **must not** include PVC manifests. Ramen manages PVC lifecycle during DR operations (creation from snapshots, replication, promotion/demotion). If ArgoCD also tracks the PVC, dual ownership causes conflicts:
+
+1. During failover, ArgoCD's PVC on the source cluster isn't cleaned up
+2. The secondary VRG detects a PVC that isn't a VolSync replication destination
+3. VRG reports `NoClusterDataConflict` and DR stalls
+
+**Solution:** Use the `directory.include` filter to exclude PVC manifests:
+```yaml
+directory:
+  include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
+```
+
+Create the initial PVC separately (e.g., via ManifestWork or deployment script) before enabling DR protection.
 
 ### Model 3: ManifestWork Only (Manual Application Deployment)
 
