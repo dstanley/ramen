@@ -68,7 +68,8 @@ spec:
         path: examples/rke2/test-app
         directory:
           recurse: false
-          include: '{namespace.yaml,configmap.yaml,pvc.yaml,deployment.yaml}'
+          # PVC excluded - Ramen manages PVC lifecycle during DR operations
+          include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
       destination:
         server: '{{ .server }}'
         namespace: ramen-test

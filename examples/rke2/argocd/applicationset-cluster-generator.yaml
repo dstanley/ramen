@@ -54,7 +54,9 @@ spec:
         path: examples/rke2/test-app
         directory:
           recurse: false
-          include: '{namespace.yaml,configmap.yaml,pvc.yaml,deployment.yaml}'
+          # PVC is excluded - Ramen manages PVC lifecycle during DR operations.
+          # Including pvc.yaml here causes dual ownership conflicts on failover.
+          include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
 
       # Destination: Cluster with the label
       destination:
