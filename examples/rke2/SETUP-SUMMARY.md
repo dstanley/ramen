@@ -21,6 +21,8 @@ export REGISTRY=registry.example.com        # Container registry accessible from
 export HUB_API=https://hub.example.com:6443 # Hub cluster API server URL
 ```
 
+The examples use `harv` and `marv` as managed cluster names — substitute your own cluster names as registered with `clusteradm join --cluster-name`.
+
 ## 1. Build Ramen Operator Image 
 
 ### Build for amd64 (from Apple Silicon Mac if needed)
