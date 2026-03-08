@@ -18,6 +18,8 @@ This provides **fully automatic application failover** without manual interventi
 
 Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is stored in the `management.cattle.io/cluster-display-name` label. The controller resolves OCM cluster names (harv, marv) to Fleet IDs using this label.
 
+**Note:** Harvester clusters imported into Rancher require manual fleet-agent bootstrapping in the `cattle-fleet-clusters-system` namespace. See [Fleet Agent Bootstrap](#fleet-agent-bootstrap-for-harvester) below.
+
 ```
 OCM Name    Fleet ID    Label
 harv        c-npk9v     management.cattle.io/cluster-display-name=harv
@@ -195,6 +197,43 @@ Fleet v0.3.9+ (Rancher v2.6.4+) correctly removes resources when a cluster no lo
 
 ```bash
 kubectl delete bundledeployment <name> -n fleet-default --context rke2
+```
+
+## Fleet Agent Bootstrap for Harvester
+
+Harvester clusters imported into Rancher have their own internal Fleet (in `cattle-fleet-system` and `cattle-fleet-local-system`). Rancher creates Fleet cluster objects (`c-npk9v`, `c-djjjc`) for these imported clusters but does not automatically bootstrap a fleet-agent that connects back to the management cluster's Fleet. This leaves the clusters in `WaitCheckIn` state.
+
+The fix is to manually deploy a fleet-agent in the `cattle-fleet-clusters-system` namespace on each Harvester cluster. This namespace is designated for upstream fleet registration and does not conflict with Harvester's internal Fleet.
+
+### Steps
+
+1. **Create a ClusterRegistrationToken on the hub** (if not already present):
+
+```bash
+kubectl apply --context rke2 -f - <<EOF
+apiVersion: fleet.cattle.io/v1alpha1
+kind: ClusterRegistrationToken
+metadata:
+  name: import-token-default
+  namespace: fleet-default
+spec:
+  ttl: 720h
+EOF
+```
+
+2. **Patch Rancher Fleet cluster clientIDs** to match the agent registration IDs (after first registration, get the IDs from the ClusterRegistration objects and patch):
+
+```bash
+kubectl patch clusters.fleet.cattle.io c-npk9v -n fleet-default --context rke2 \
+  --type merge -p '{"spec":{"clientID":"<agent-registration-id>"}}'
+```
+
+3. **On each Harvester cluster**, create the bootstrap secret, configmap, and fleet-agent deployment. See `setup-fleet.sh` for the complete bootstrap procedure.
+
+4. **Verify** the Fleet clusters show `BUNDLES-READY: 1/1` and `LAST-SEEN` is set:
+
+```bash
+kubectl get clusters.fleet.cattle.io -n fleet-default --context rke2 -o wide
 ```
 
 ## Architecture
