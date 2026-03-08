@@ -1117,6 +1117,16 @@ Test environment: RKE2 hub + 2 Harvester clusters, VolSync rsync-tls over Submar
 - ArgoCD automatically removes app from source when PlacementDecision empties
 - Expected to be significantly faster once Ramen bug fixes are applied
 
-**Note:** RPO depends on VolSync schedulingInterval configured in DRPolicy (default: 5m). RTO depends on PVC restore time, app startup time, and deployment model. ArgoCD provides fastest failover since app deployment is fully automatic.
+### Fleet GitRepo Model
 
+#### Failover (harv → marv)
+- **RTO**: ~30 seconds (from DRPC Failover trigger to DRPC Completed)
+- **RPO**: Based on VolSync sync interval (default: 5m)
+- Fleet DR controller relabels Fleet clusters, Fleet automatically deploys app to target
 
+#### Relocate (marv → harv)
+- **RTO**: ~115 seconds (includes graceful quiesce and final sync)
+- **RPO**: Zero (final sync completes before cutover)
+- Fleet DR controller unlabels all clusters during quiesce, Fleet removes app freeing PVC for final sync
+
+**Note:** RPO depends on VolSync schedulingInterval configured in DRPolicy (default: 5m). RTO depends on PVC restore time, app startup time, and deployment model. ArgoCD and Fleet provide fastest failover since app deployment is fully automatic.
