@@ -1,111 +1,58 @@
-# RKE2 Configuration Examples
+# Ramen DR on RKE2/Harvester
 
-This directory contains example configurations for deploying Ramen DR on RKE2 clusters.
+Example configurations and scripts for running Ramen disaster recovery across RKE2/Harvester clusters using OCM, VolSync, and Longhorn.
 
-## Prerequisites
+## Documentation
 
-1. **RKE2 Clusters**: At least 3 RKE2 clusters (1 hub, 2 managed)
-2. **OCM (Open Cluster Management)**: Installed on all clusters
-3. **Longhorn**: Installed on managed clusters for storage
-4. **Velero**: Installed on managed clusters for backup
-5. **S3-compatible Storage**: MinIO or similar for backup storage
+| Document | Description |
+|----------|-------------|
+| [SETUP-SUMMARY.md](SETUP-SUMMARY.md) | Step-by-step setup guide: building Ramen, installing OCM, deploying operators, configuring VolSync and Submariner |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture overview, component relationships, DR operation flows, deployment model comparison, and troubleshooting |
 
-## Configuration Files
+## Directory Structure
 
-| File | Description |
-|------|-------------|
-| `dr_hub_config.yaml` | RamenConfig for the hub operator |
-| `dr_cluster_config.yaml` | RamenConfig for DR cluster operators |
-| `drpolicy.yaml` | Sample DRPolicy resource |
-| `drcluster.yaml` | Sample DRCluster resources |
+```
+rke2/
+  scripts/
+    demo-dr.sh              # Unified DR demo: deploy, failover, relocate, cleanup
+    app-controller.sh        # App placement controller for ManifestWork model
+  test-app/                  # Sample DR-protected application manifests
+  argocd/                    # ArgoCD integration (ApplicationSet + DR controller)
+  fleet/                     # Rancher Fleet integration (GitRepo + DR controller)
+  dr_hub_config.yaml         # Ramen hub operator configuration
+  dr_cluster_config.yaml     # Ramen DR cluster operator configuration
+  drpolicy.yaml              # DRPolicy resource
+  drcluster.yaml             # DRCluster resources
+  minio.yaml                 # MinIO deployment for S3 storage
+```
 
-## Installation Steps
+## Quick Start
 
-### 1. Deploy Hub Operator
-
-On the OCM hub cluster:
+After completing [setup](SETUP-SUMMARY.md), use `demo-dr.sh` to run the full DR lifecycle:
 
 ```bash
-# Create ConfigMap with hub configuration
-kubectl create configmap ramen-hub-operator-config \
-  --from-file=ramen_manager_config.yaml=dr_hub_config.yaml \
-  -n ramen-system
+# Deploy app with DR protection (choose: manifestwork, argocd, or fleet)
+./scripts/demo-dr.sh deploy harv --model fleet
 
-# Deploy hub operator
-kubectl apply -k config/hub/default/k8s
+# Failover to secondary cluster
+./scripts/demo-dr.sh failover marv --model fleet
+
+# Relocate back to primary
+./scripts/demo-dr.sh relocate harv --model fleet
+
+# Check status
+./scripts/demo-dr.sh status --model fleet
+
+# Cleanup
+./scripts/demo-dr.sh cleanup --model fleet
 ```
 
-### 2. Deploy DR Cluster Operator
+## Deployment Models
 
-On each managed RKE2 cluster:
+Ramen supports three application deployment models. See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed comparison.
 
-```bash
-# Create ConfigMap with cluster configuration
-kubectl create configmap ramen-dr-cluster-operator-config \
-  --from-file=ramen_manager_config.yaml=dr_cluster_config.yaml \
-  -n ramen-system
-
-# Deploy DR cluster operator
-kubectl apply -k config/dr-cluster/default/k8s
-```
-
-### 3. Create DR Resources
-
-On the hub cluster:
-
-```bash
-# Create DRCluster resources for each managed cluster
-kubectl apply -f drcluster.yaml
-
-# Create DRPolicy
-kubectl apply -f drpolicy.yaml
-```
-
-## Storage Configuration
-
-### Longhorn StorageClass
-
-Ensure your Longhorn StorageClass has the Ramen label:
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: longhorn-ramen
-  labels:
-    ramendr.openshift.io/storageid: "longhorn"
-provisioner: driver.longhorn.io
-```
-
-### VolumeSnapshotClass
-
-Create a VolumeSnapshotClass for VolSync:
-
-```yaml
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshotClass
-metadata:
-  name: longhorn-snapshot
-  labels:
-    ramendr.openshift.io/storageid: "longhorn"
-driver: driver.longhorn.io
-deletionPolicy: Delete
-```
-
-## Verification
-
-Check operator status:
-
-```bash
-# On hub
-kubectl get pods -n ramen-system -l app=ramen-hub
-
-# On managed clusters
-kubectl get pods -n ramen-system -l app=ramen-dr-cluster
-```
-
-Check DR resources:
-
-```bash
-kubectl get drpolicy,drcluster
-```
+| Model | How it works | Cleanup on failover |
+|-------|-------------|---------------------|
+| **ManifestWork** | Direct resource deployment via OCM | Manual (app-controller.sh) |
+| **ArgoCD** | ApplicationSet with Placement integration | Automatic |
+| **Fleet** | Rancher Fleet GitRepo with cluster label targeting | Automatic |
