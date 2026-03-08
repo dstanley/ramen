@@ -610,18 +610,20 @@ subctl join broker-info.subm \
   --servicecidr <service-cidr>
 ```
 
-### VRG Not Finding PVCs After Failover (created-by-ramen label)
+### VRG Not Finding PVCs After Failover (created-by-ramen label) (Ramen Bug - Fixed)
 
-After failover, the VRG on the new primary cluster may show "No PVCs are protected using Volsync scheme" even though PVCs exist.
+After failover or relocate, the VRG on the new primary cluster shows "No PVCs are protected using Volsync scheme" even though PVCs exist. `DataProtected` never becomes `True`.
 
 **Symptom:** VRG controller logs show:
 ```
 Found 0 PVCs using label selector app=rto-rpo-test,app.kubernetes.io/created-by notin (volsync),ramendr.openshift.io/created-by-ramen notin (true)
 ```
 
-**Cause:** The restored PVC has the label `ramendr.openshift.io/created-by-ramen: "true"` which is excluded from the VRG's PVC selector.
+**Root Cause:** `ensurePVCFromSnapshot()` in `vshandler.go` stamps restored PVCs with the label `ramendr.openshift.io/created-by-ramen=true` to prevent premature VRG enumeration during restore. However, the label is never removed after restore completes. `ListPVCsByPVCSelector()` in `pvcs_util.go` explicitly filters out PVCs with this label, so the VRG permanently ignores the restored PVC.
 
-**Fix:** Remove the label from the PVC:
+**Fix:** Remove the `created-by-ramen` label after the PVC is successfully created/updated from the snapshot in `ensurePVCFromSnapshot()`.
+
+**Workaround (if running unfixed Ramen):** Remove the label from the PVC:
 ```bash
 kubectl label pvc <pvc-name> -n <namespace> ramendr.openshift.io/created-by-ramen-
 ```
@@ -646,6 +648,40 @@ kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}
 ```
 
 Then recreate the namespace if needed for the secondary VRG.
+
+### VolSync PSK Secret Not Propagating to Managed Clusters
+
+The VolSync PSK secret is never created on managed clusters even though the DRPC is deployed.
+
+**Symptom:** VRG controller logs show:
+```
+ERROR Failed to reconcile VolSync Replication Destination "error": "psk secret: <drpc-name>-vs-secret is not found"
+```
+
+PlacementRule controller on hub shows:
+```
+listed clusters original count: 0
+```
+
+**Root Cause:** The `ManagedClusterSetBinding` is missing in the application namespace. The PlacementRule controller cannot discover managed clusters without it, so the OCM Policy that propagates the PSK secret is never placed on any cluster.
+
+**Fix:** Create the ManagedClusterSetBinding in the application namespace:
+```bash
+kubectl apply -f - <<EOF
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: default
+  namespace: <app-namespace>
+spec:
+  clusterSet: default
+EOF
+```
+
+Then trigger DRPC reconciliation:
+```bash
+kubectl annotate drpc <drpc-name> -n <app-namespace> reconcile="$(date +%s)" --overwrite
+```
 
 ### VolSync PSK Secret Missing After Namespace Recreation
 
@@ -686,6 +722,30 @@ kubectl delete manifestwork <manifestwork-name> -n <cluster-namespace>
 ```
 
 The DRPC controller will recreate it within a few seconds.
+
+### ArgoCD ApplicationSet: PVC Dual Ownership Conflict
+
+When using ArgoCD ApplicationSets for DR-protected applications, including the PVC in the ApplicationSet causes dual ownership conflicts during failover.
+
+**Symptom:** After failover, the secondary VRG reports:
+```
+NoClusterDataConflict: False - A PVC that is not a replication destination should not match the label selector
+```
+
+**Root Cause:** Both ArgoCD and Ramen attempt to manage the PVC lifecycle. During failover, the PVC on the source cluster retains ArgoCD tracking labels and is not cleaned up, causing the secondary VRG to detect a PVC that isn't a VolSync replication destination.
+
+**Fix:** Exclude `pvc.yaml` from the ArgoCD ApplicationSet's directory include list. Ramen should be the sole owner of PVC lifecycle during DR operations:
+```yaml
+sources:
+- repoURL: https://github.com/example/repo.git
+  path: app/
+  directory:
+    recurse: false
+    # PVC excluded - Ramen manages PVC lifecycle during DR operations
+    include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
+```
+
+The initial PVC should be created separately (e.g., via ManifestWork or the `demo-dr.sh` script) before enabling DR protection.
 
 ## Architecture Summary
 
@@ -907,23 +967,18 @@ If Relocate is stuck at `RunningFinalSync`:
 
 ## Known Issues and Bugs
 
-### VRG PVC Finalizer Not Removed During Primary Promotion (Ramen Bug)
+### VRG PVC Finalizer Not Removed Before Deletion (Ramen Bug - Fixed)
 
-**Issue:** During Relocate, when the VRG promotes a cluster to Primary and finds a PVC with wrong datasource (from a previous cycle), it deletes the PVC. However, the PVC has a VRG finalizer (`volumereplicationgroups.ramendr.openshift.io/pvc-volsync-protection`) that blocks deletion.
+**Issue:** During Relocate, when `ensurePVCFromSnapshot()` detects a PVC with an incorrect datasource and attempts to delete and recreate it from a VolumeSnapshot, the PVC gets stuck in `Terminating` state indefinitely.
 
-**Root Cause:** In `vrg_volsync.go:826-847`, the `isPVCDeletedForUnprotection` function returns `false` when:
-- VRG ReplicationState is not Primary, OR
-- PrepareForFinalSync is true, OR
-- RunFinalSync is true
+**Root Cause:** `ensurePVCFromSnapshot()` in `vshandler.go` calls `v.client.Delete(pvc)` without first removing the Ramen-owned finalizer `volumereplicationgroups.ramendr.openshift.io/pvc-volsync-protection`. Kubernetes honors the finalizer and blocks deletion. No other code path removes the finalizer for this scenario.
 
-During Primary promotion, the VRG is in a transitional state, so the finalizer removal logic is skipped. The PVC gets stuck in `Terminating` state.
+**Fix:** Remove the `pvc-volsync-protection` finalizer before issuing the delete call in `ensurePVCFromSnapshot()`. This follows the same pattern already used in `cleanupPVCFromSnapshot()`.
 
-**Workaround:** Manually remove the finalizer:
+**Workaround (if running unfixed Ramen):** Manually remove the finalizer:
 ```bash
 kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
 ```
-
-**Suggested Fix:** The `ensurePVCFromSnapshot` function in `vshandler.go:2128` should remove the finalizer before calling `Delete` on the PVC with incorrect datasource.
 
 ### Application Lifecycle Controller Gap
 
@@ -1020,14 +1075,29 @@ done
 
 Test environment: RKE2 hub + 2 Harvester clusters, VolSync rsync-tls over Submariner
 
-### Failover (harv → marv)
+### ManifestWork Model (Manual App Deployment)
+
+#### Failover (harv → marv)
 - **RTO**: ~52 seconds (from DRPC Failover trigger to app running on marv)
 - **RPO**: ~5.5 minutes (data loss window based on VolSync sync interval)
 
-### Failback/Relocate (marv → harv)
+#### Failback/Relocate (marv → harv)
 - **RTO**: Higher due to final sync requirement
 - **RPO**: Minimal (final sync captures latest writes)
 
-**Note:** RPO depends on VolSync schedulingInterval configured in DRPolicy (default: 5m). RTO depends on PVC restore time, app startup time, and whether app controller detects Relocate phase early.
+### ArgoCD ApplicationSet Model
+
+#### Failover (harv → marv)
+- **RTO**: ~22 seconds (from DRPC Failover trigger to DRPC Completed)
+- **RPO**: Based on VolSync sync interval (default: 5m)
+- ArgoCD automatically deploys app to new cluster via PlacementDecision change
+
+#### Relocate (marv → harv)
+- **RTO**: ~707 seconds (with manual intervention for two Ramen bugs, see Known Issues)
+- **RPO**: Minimal (final sync captures latest writes before cutover)
+- ArgoCD automatically removes app from source when PlacementDecision empties
+- Expected to be significantly faster once Ramen bug fixes are applied
+
+**Note:** RPO depends on VolSync schedulingInterval configured in DRPolicy (default: 5m). RTO depends on PVC restore time, app startup time, and deployment model. ArgoCD provides fastest failover since app deployment is fully automatic.
 
 
