@@ -508,34 +508,91 @@ When Ramen updates the PlacementDecision:
 - **Application must be manually deployed** ❌
 - Failover is **incomplete** until user deploys the application
 
+### Model 4: Rancher Fleet GitRepo
+
+Fleet is Rancher's built-in GitOps engine. It deploys workloads from Git repositories to downstream clusters using a pull-based architecture.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Hub Cluster                                     │
+│                                                                              │
+│  ┌──────────────────────┐     ┌─────────────────────────────┐               │
+│  │      GitRepo         │────>│      Cluster Selector       │               │
+│  │  (Git repo + path    │     │  ramen.dr/fleet-enabled=true│               │
+│  │   for manifests)     │     └──────────────┬──────────────┘               │
+│  └──────────┬───────────┘                    │                              │
+│             │                                ▼                              │
+│             │                   ┌─────────────────────────┐                 │
+│             │                   │   Fleet Cluster (harv)  │                 │
+│             │                   │   c-npk9v               │                 │
+│             │                   └───────────┬─────────────┘                 │
+│             │                               │                               │
+│             ▼                               ▼                               │
+│  Fleet controller creates BundleDeployment for matching cluster             │
+│             │                                                               │
+│             ▼                                                               │
+│  ┌────────────────────┐                                                     │
+│  │  BundleDeployment  │  (Fleet agent pulls and deploys)                    │
+│  │  (for cluster harv)│                                                     │
+│  └────────────────────┘                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**How Fleet Deployment Works:**
+
+1. User creates a GitRepo pointing to a Git repository with application manifests
+2. GitRepo uses `clusterSelector` to target clusters with `ramen.dr/fleet-enabled=true`
+3. `fleet-dr-controller.sh` watches PlacementDecision and labels/unlabels Fleet Cluster resources
+4. Fleet controller creates BundleDeployment for matching clusters
+5. Fleet agent on the managed cluster pulls and deploys the resources
+
+**Fleet Cluster Naming:**
+
+Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is available via the `management.cattle.io/cluster-display-name` label. The DR controller translates between OCM cluster names and Fleet IDs.
+
+**DR Behavior:**
+
+When Ramen updates the PlacementDecision:
+- `fleet-dr-controller.sh` detects the change and relabels Fleet clusters
+- Fleet **automatically removes** BundleDeployment from the old cluster
+- Fleet **automatically creates** BundleDeployment for the new cluster
+- Fleet agent deploys the application on the new cluster
+- **Automatic failover and relocate** - no manual intervention required
+
+**PVC Ownership:**
+
+The GitRepo **must not** include PVC manifests. A `.fleetignore` file in the app directory excludes `pvc.yaml`. This is the Fleet equivalent of ArgoCD's `directory.include` filter.
+
 ### Comparison: Failover vs Relocate Behavior by Deployment Model
 
 #### Failover (Source cluster unavailable)
 
-| Step | OCM Subscription | ArgoCD ApplicationSet | ManifestWork Only |
-|------|------------------|----------------------|-------------------|
-| Ramen updates PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
-| Failover completes without intervention | ✓ Yes | ✓ Yes | ❌ No |
+| Step | OCM Subscription | ArgoCD ApplicationSet | Fleet GitRepo | ManifestWork Only |
+|------|------------------|----------------------|---------------|-------------------|
+| Ramen updates PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Failover completes without intervention | ✓ Yes | ✓ Yes | ✓ Yes | ❌ No |
 
 #### Relocate (Both clusters available, requires final sync)
 
-| Step | OCM Subscription | ArgoCD ApplicationSet | ManifestWork Only |
-|------|------------------|----------------------|-------------------|
-| Ramen empties PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application removed from source | ⚠️ **Manual** (see note) | ✓ Automatic | ❌ Manual |
-| Final sync completes | ✓ After cleanup | ✓ Automatic | ⚠️ May block |
-| VRG created on target | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
-| Relocate completes without intervention | ⚠️ May need manual cleanup | ✓ Yes | ❌ No |
+| Step | OCM Subscription | ArgoCD ApplicationSet | Fleet GitRepo | ManifestWork Only |
+|------|------------------|----------------------|---------------|-------------------|
+| Ramen empties PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application removed from source | ⚠️ **Manual** (see note) | ✓ Automatic | ✓ Automatic | ❌ Manual |
+| Final sync completes | ✓ After cleanup | ✓ Automatic | ✓ Automatic | ⚠️ May block |
+| VRG created on target | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Relocate completes without intervention | ⚠️ May need manual cleanup | ✓ Yes | ✓ Yes | ❌ No |
 
 **⚠️ OCM Subscription Note:** The subscription controller does not automatically remove ManifestWork when PlacementDecision becomes empty. During relocate, you may need to manually delete the app ManifestWork from the source cluster namespace on the hub to allow the final sync to complete.
 
 ### Recommendation
 
-**For production DR with relocate support:** Consider ArgoCD ApplicationSet as it handles both failover and relocate automatically.
+**For production DR with relocate support:** Consider ArgoCD ApplicationSet or Fleet GitRepo as both handle failover and relocate automatically.
+
+**If using Rancher:** Fleet is the natural choice since it's already installed. No additional components needed.
 
 **For failover-only scenarios:** OCM Subscription works well - the application is automatically deployed to the target cluster.
 

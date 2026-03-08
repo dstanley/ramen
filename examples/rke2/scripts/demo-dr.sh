@@ -5,7 +5,8 @@
 # This script provides a unified interface for demonstrating Ramen DR
 # with different deployment models:
 #   - manifestwork: Direct ManifestWork-based deployment (simplest)
-#   - argocd: ArgoCD ApplicationSet with OCM Placement (recommended for production)
+#   - argocd: ArgoCD ApplicationSet with OCM Placement
+#   - fleet: Rancher Fleet GitRepo with cluster label targeting
 #
 # The script manages the full lifecycle: deploy, failover, relocate, cleanup
 
@@ -52,12 +53,12 @@ Commands:
   watch               Watch DR operations in real-time
 
 Options:
-  --model <type>      Deployment model: manifestwork (default) or argocd
+  --model <type>      Deployment model: manifestwork (default), argocd, or fleet
   --namespace <ns>    Namespace for DR resources (default: ramen-test)
   --help              Show this help
 
 Environment Variables:
-  DEPLOYMENT_MODEL    Set deployment model (manifestwork/argocd)
+  DEPLOYMENT_MODEL    Set deployment model (manifestwork/argocd/fleet)
   HUB_CONTEXT         kubectl context for hub cluster (default: rke2)
   DR_NAMESPACE        Namespace for DR resources (default: ramen-test)
 
@@ -67,6 +68,9 @@ Examples:
 
   # Deploy with ArgoCD model
   $0 deploy harv --model argocd
+
+  # Deploy with Fleet model
+  $0 deploy harv --model fleet
 
   # Failover to marv
   $0 failover marv
@@ -350,7 +354,11 @@ cmd_deploy() {
             ;;
         argocd)
             log "ArgoCD deployment - ApplicationSet handles app lifecycle"
-            # ApplicationSet should already be watching Placement
+            log "Ensure argocd-dr-controller.sh is running and ApplicationSet is applied"
+            ;;
+        fleet)
+            log "Fleet deployment - GitRepo handles app lifecycle"
+            log "Ensure fleet-dr-controller.sh is running and gitrepo.yaml is applied"
             ;;
         *)
             error "Unknown deployment model: $DEPLOYMENT_MODEL"
@@ -562,6 +570,14 @@ cmd_status() {
                 -o jsonpath='{.metadata.name}' 2>/dev/null || echo "none"
             echo ""
         done
+    elif [[ "$DEPLOYMENT_MODEL" == "fleet" ]]; then
+        echo "Fleet GitRepo:"
+        kubectl --context "$HUB_CONTEXT" get gitrepo "$APP_NAME" -n fleet-default \
+            -o custom-columns='NAME:.metadata.name,READY:.status.readyClusters,DESIRED:.status.desiredReadyClusters' 2>/dev/null || echo "  Not found"
+        echo ""
+        echo "Fleet Cluster Labels:"
+        kubectl --context "$HUB_CONTEXT" get clusters.fleet.cattle.io -n fleet-default \
+            -o custom-columns='FLEET_ID:.metadata.name,DISPLAY:.metadata.labels.management\.cattle\.io/cluster-display-name,DR_ENABLED:.metadata.labels.ramen\.dr/fleet-enabled' 2>/dev/null || true
     fi
 }
 
