@@ -221,6 +221,18 @@ deploy_dr_resources() {
     kubectl --context "$HUB_CONTEXT" create namespace "$NAMESPACE" --dry-run=client -o yaml | \
         kubectl --context "$HUB_CONTEXT" apply -f -
 
+    # Ensure ManagedClusterSetBinding exists for policy propagation
+    log "Ensuring ManagedClusterSetBinding..."
+    kubectl --context "$HUB_CONTEXT" apply -f - <<EOF
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: default
+  namespace: $NAMESPACE
+spec:
+  clusterSet: default
+EOF
+
     # Create PVC ManifestWork for primary cluster
     log "Creating PVC on $primary_cluster..."
     kubectl --context "$HUB_CONTEXT" apply -f - <<EOF
@@ -290,6 +302,14 @@ spec:
   pvcSelector:
     matchLabels:
       appname: $APP_NAME
+  volSyncSpec:
+    moverConfig:
+    - pvcName: $PVC_NAME
+      pvcNamespace: $NAMESPACE
+      moverSecurityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
 EOF
 
     log "Waiting for DRPC to initialize..."
