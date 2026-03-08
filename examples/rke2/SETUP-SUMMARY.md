@@ -212,6 +212,14 @@ clusteradm accept --clusters harv,marv
 kubectl get csr | grep -E "harv|marv" | grep Pending
 kubectl certificate approve <pending-csr-names>
 
+# Add 'name' labels to ManagedClusters (required for VolSync secret propagation)
+# The OCM PlacementRule controller selects clusters by label "name=<cluster>"
+# rather than metadata.name. Upstream OCM (clusteradm) does not set this
+# automatically, unlike RHACM. Without this label, the governance policy that
+# distributes the VolSync PSK secret will not propagate to managed clusters.
+kubectl label managedcluster harv name=harv
+kubectl label managedcluster marv name=marv
+
 # Verify
 kubectl get managedclusters
 ```

@@ -237,6 +237,16 @@ spec:
   clusterSet: default
 EOF
 
+    # Ensure ManagedClusters have the 'name' label.
+    # The OCM PlacementRule controller (used by Ramen to propagate the VolSync
+    # PSK secret) selects clusters by label "name=<cluster>" rather than by
+    # metadata.name. Upstream OCM (clusteradm) does not set this label
+    # automatically, unlike RHACM.
+    log "Ensuring ManagedCluster name labels..."
+    for cluster in $(kubectl --context "$HUB_CONTEXT" get drpolicy -o jsonpath='{.items[0].spec.drClusters[*]}' 2>/dev/null); do
+        kubectl --context "$HUB_CONTEXT" label managedcluster "$cluster" "name=$cluster" --overwrite 2>/dev/null || true
+    done
+
     # Create PVC ManifestWork for primary cluster
     log "Creating PVC on $primary_cluster..."
     kubectl --context "$HUB_CONTEXT" apply -f - <<EOF

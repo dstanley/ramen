@@ -74,9 +74,35 @@ get_display_name() {
 }
 
 get_current_placement() {
-    kubectl --context "$HUB_CONTEXT" get placementdecision -n "$NAMESPACE" \
+    # During failover, PlacementDecision may contain two entries:
+    # one with reason "RetainedForFailover" (old cluster) and the active target.
+    # We need the non-retained cluster (the active placement target).
+    local decisions
+    decisions=$(kubectl --context "$HUB_CONTEXT" get placementdecision -n "$NAMESPACE" \
         -l cluster.open-cluster-management.io/placement="$PLACEMENT_NAME" \
-        -o jsonpath='{.items[0].status.decisions[0].clusterName}' 2>/dev/null || echo ""
+        -o jsonpath='{range .items[0].status.decisions[*]}{.clusterName},{.reason}{"\n"}{end}' 2>/dev/null) || echo ""
+
+    if [[ -z "$decisions" ]]; then
+        echo ""
+        return
+    fi
+
+    # Find the first decision that is NOT RetainedForFailover
+    local active=""
+    local first=""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local name="${line%%,*}"
+        local reason="${line#*,}"
+        [[ -z "$first" ]] && first="$name"
+        if [[ "$reason" != "RetainedForFailover" ]]; then
+            active="$name"
+            break
+        fi
+    done <<< "$decisions"
+
+    # If all are retained (shouldn't happen), fall back to first
+    echo "${active:-$first}"
 }
 
 get_all_fleet_clusters() {
