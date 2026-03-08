@@ -12,6 +12,15 @@ This document summarizes the steps to deploy Ramen DR with:
 - If using VMs, set CPU type to `host` (for x86-64-v2 support)
 - Kubie for helper scripts
 
+## Environment Variables
+
+Set these to match your environment. Examples throughout this document use these values.
+
+```bash
+export REGISTRY=registry.example.com        # Container registry accessible from all clusters
+export HUB_API=https://hub.example.com:6443 # Hub cluster API server URL
+```
+
 ## 1. Build Ramen Operator Image 
 
 ### Build for amd64 (from Apple Silicon Mac if needed)
@@ -25,15 +34,15 @@ rdctl set --virtual-machine.use-rosetta
 rdctl shutdown && sleep 2 && open -a "Rancher Desktop" && sleep 30
 
 # Build for amd64
-docker buildx build --platform linux/amd64 -t registry.192.168.7.68.nip.io/ramen-operator:dev --load .
+docker buildx build --platform linux/amd64 -t $REGISTRY/ramen-operator:dev --load .
 ```
 
 ### Push to Registry (with self-signed cert)
 
 ```bash
 # Used skopeo to bypass TLS issues (test lab)
-docker save registry.192.168.7.68.nip.io/ramen-operator:dev -o ramen-operator.tar
-skopeo copy --dest-tls-verify=false docker-archive:ramen-operator.tar docker://registry.192.168.7.68.nip.io/ramen-operator:dev
+docker save $REGISTRY/ramen-operator:dev -o ramen-operator.tar
+skopeo copy --dest-tls-verify=false docker-archive:ramen-operator.tar docker://$REGISTRY/ramen-operator:dev
 rm ramen-operator.tar
 ```
 
@@ -121,7 +130,7 @@ kubectl get clustermanagementaddon
 ## 5. Deploy Ramen Hub Operator
 
 ```bash
-make deploy-hub IMG=registry.192.168.7.68.nip.io/ramen-operator:dev PLATFORM=k8s
+make deploy-hub IMG=$REGISTRY/ramen-operator:dev PLATFORM=k8s
 
 # Verify
 kubectl get pods -n ramen-system
@@ -173,7 +182,7 @@ kind: Config
 clusters:
 - name: "harv"
   cluster:
-    server: "https://192.168.7.51/k8s/clusters/local"
+    server: "https://<harvester-vip>/k8s/clusters/local"
     insecure-skip-tls-verify: true
 users:
 - name: "harv"
@@ -198,11 +207,11 @@ clusteradm get token
 Replace with your specific ip's as appropriate.
 
 kubie ctx harv
-clusteradm join --hub-token <token> --hub-apiserver https://192.168.7.79:6443 --cluster-name harv --wait
+clusteradm join --hub-token <token> --hub-apiserver $HUB_API --cluster-name harv --wait
 
 # Join marv
 kubie ctx marv
-clusteradm join --hub-token <token> --hub-apiserver https://192.168.7.79:6443 --cluster-name marv --wait
+clusteradm join --hub-token <token> --hub-apiserver $HUB_API --cluster-name marv --wait
 
 # Accept clusters on hub
 kubie ctx <hub>
@@ -274,11 +283,11 @@ Installs the cluster operator on to the downstream harvester nodes.
 ```bash
 # On harv
 kubie ctx harv
-make deploy-dr-cluster IMG=registry.192.168.7.68.nip.io/ramen-operator:dev PLATFORM=k8s
+make deploy-dr-cluster IMG=$REGISTRY/ramen-operator:dev PLATFORM=k8s
 
 # On marv
 kubie ctx marv
-make deploy-dr-cluster IMG=registry.192.168.7.68.nip.io/ramen-operator:dev PLATFORM=k8s
+make deploy-dr-cluster IMG=$REGISTRY/ramen-operator:dev PLATFORM=k8s
 
 # Verify pods are running (2/2)
 kubie exec harv default kubectl get pods -n ramen-system
