@@ -81,7 +81,7 @@ preflight_checks() {
     # Placement controller
     local placement_pods
     placement_pods=$(kubectl --context "$HUB_CONTEXT" get pods -n open-cluster-management-hub \
-        -l app=cluster-manager-placement-controller -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
+        -l app=clustermanager-placement-controller -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
     if [[ "$placement_pods" == "Running" ]]; then
         check_ok "Placement controller running"
     else
@@ -199,7 +199,7 @@ preflight_checks() {
     # Governance policy framework
     local propagator
     propagator=$(kubectl --context "$HUB_CONTEXT" get pods -n open-cluster-management \
-        -l app=governance-policy-propagator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
+        -l name=governance-policy-propagator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
     if [[ "$propagator" == "Running" ]]; then
         check_ok "Governance policy propagator running"
     else
