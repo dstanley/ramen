@@ -1029,11 +1029,37 @@ func (v *VRGInstance) validateSecondaryPVCConflictForVolsync() bool {
 		}
 
 		if !matchFound {
+			// During a relocate, the VRG transitions from primary to secondary. PVCs that were
+			// previously protected as primary may still exist while the application is being
+			// cleaned up. These are not conflicts — they are expected transient leftovers.
+			// Check if the PVC matches a previously protected PVC to avoid a false conflict
+			// that would block the SettingUpVolSyncDest progression.
+			if v.isPreviouslyProtectedPVC(pvc.GetName(), pvc.GetNamespace()) {
+				v.log.Info("Skipping conflict for PVC that was previously protected as primary",
+					"pvc", pvc.GetName(), "namespace", pvc.GetNamespace())
+
+				continue
+			}
+
 			return true // No match found for this PVC, conflict detected!
 		}
 	}
 
 	return false // No conflicts found
+}
+
+// isPreviouslyProtectedPVC checks if a PVC was previously protected by this VRG when it was primary.
+// This is used during the primary-to-secondary transition to avoid false conflict detection
+// for PVCs that haven't been cleaned up yet.
+func (v *VRGInstance) isPreviouslyProtectedPVC(name, namespace string) bool {
+	for i := range v.instance.Status.ProtectedPVCs {
+		if v.instance.Status.ProtectedPVCs[i].Name == name &&
+			v.instance.Status.ProtectedPVCs[i].Namespace == namespace {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (v *VRGInstance) aggregateVolSyncClusterDataConflictCondition() *metav1.Condition {
