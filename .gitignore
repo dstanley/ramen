@@ -67,3 +67,6 @@ ginkgo.report
 
 # Output files
 out/
+
+# Bug reports (draft/local only)
+BUG-REPORT-*.md
