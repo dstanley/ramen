@@ -517,7 +517,6 @@ while true; do
     fi
 
     # Monitor DRPC phase transitions
-    local current_phase
     current_phase=$(get_drpc_phase)
     if [[ "$current_phase" != "$LAST_DRPC_PHASE" && -n "$current_phase" ]]; then
         case "$current_phase" in
