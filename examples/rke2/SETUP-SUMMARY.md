@@ -168,6 +168,8 @@ Ramen requires several CRDs on managed clusters for the DR cluster operator to f
 
 ### 8.1 CSI Addon CRDs
 
+Only the VolumeReplication and VolumeReplicationClass CRDs are strictly required — the DR cluster operator will crash without them. The remaining CRDs are optional: VolumeGroupReplication and VolumeGroupSnapshot CRDs enable consistency group support for multi-PVC applications, while NetworkFenceClass and CSIAddonsNode enable storage-level network fencing for shared storage backends (e.g., Dell PowerFlex, Ceph/RBD). We install all of them since they are harmless if unused and avoid debugging missing-CRD issues later.
+
 ```bash
 # Apply to both harv and marv (test clusters in this example)
 
