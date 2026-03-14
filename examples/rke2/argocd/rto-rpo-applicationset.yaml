@@ -1,4 +1,4 @@
-# RTO/RPO Test Application - ArgoCD ApplicationSet with OCM Placement Integration
+# RTO/RPO Test Application - ArgoCD ApplicationSet with Placement Integration
 #
 # This ApplicationSet automatically deploys the RTO/RPO test application to
 # whichever cluster is selected by the PlacementDecision. When Ramen updates
@@ -9,7 +9,7 @@
 #
 # Prerequisites:
 # - ArgoCD installed on hub cluster
-# - setup-argocd-ocm.sh has been run to configure OCM integration
+# - setup-argocd.sh has been run to configure Placement integration
 # - DRPlacementControl and Placement created in ramen-test namespace
 #
 apiVersion: argoproj.io/v1alpha1

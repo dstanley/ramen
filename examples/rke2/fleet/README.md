@@ -1,6 +1,6 @@
-# Fleet Integration with OCM Placement for Ramen DR
+# Fleet Integration with Ramen DR
 
-This directory contains scripts and manifests for setting up Rancher Fleet with OCM Placement integration for automatic application failover during DR operations.
+This directory contains scripts and manifests for setting up Rancher Fleet with Placement integration for automatic application failover during DR operations.
 
 ## Overview
 
@@ -16,12 +16,12 @@ This provides **fully automatic application failover** without manual interventi
 
 ## Fleet Cluster Naming
 
-Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is stored in the `management.cattle.io/cluster-display-name` label. The controller resolves OCM cluster names (harv, marv) to Fleet IDs using this label.
+Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is stored in the `management.cattle.io/cluster-display-name` label. The controller resolves managed cluster names (harv, marv) to Fleet IDs using this label.
 
 **Note:** Harvester clusters imported into Rancher require manual fleet-agent bootstrapping in the `cattle-fleet-clusters-system` namespace. See [Fleet Agent Bootstrap](#fleet-agent-bootstrap-for-harvester) below.
 
 ```
-OCM Name    Fleet ID    Label
+Name        Fleet ID    Label
 harv        c-npk9v     management.cattle.io/cluster-display-name=harv
 marv        c-djjjc     management.cattle.io/cluster-display-name=marv
 ```
@@ -32,8 +32,7 @@ marv        c-djjjc     management.cattle.io/cluster-display-name=marv
 
 - Rancher installed on hub cluster (Fleet is bundled with Rancher)
 - Managed clusters registered with Rancher
-- OCM hub components running
-- Managed clusters registered with OCM
+- OTS controller running on hub (see [ots/README.md](../ots/README.md))
 
 ### Verify Fleet Installation
 
@@ -138,7 +137,7 @@ Fleet **must not** deploy the PVC. Ramen manages PVC lifecycle during DR operati
 | Relocate cleanup | Manual or app-controller | Automatic | Automatic |
 | Git integration | None | Full GitOps | Full GitOps |
 | Cluster naming | Friendly names (harv) | Friendly names | Auto-generated IDs (c-xxxxx) |
-| Prerequisite | OCM only | ArgoCD + OCM | Rancher + Fleet + OCM |
+| Prerequisite | OTS only | ArgoCD + OTS | Rancher + Fleet + OTS |
 | Complexity | Low | Medium | Low (if Rancher installed) |
 
 ## Files
@@ -167,7 +166,7 @@ kubectl get clusters.fleet.cattle.io -n fleet-default --context rke2 \
 kubectl logs -n cattle-fleet-system -l app=fleet-controller --context rke2 --tail=50
 ```
 
-### Fleet cluster not found for OCM name
+### Fleet cluster not found for managed cluster name
 
 If the controller reports "Cannot resolve Fleet cluster ID", verify the display name label:
 
@@ -176,7 +175,7 @@ kubectl get clusters.fleet.cattle.io -n fleet-default --context rke2 \
   -o custom-columns='ID:.metadata.name,DISPLAY:.metadata.labels.management\.cattle\.io/cluster-display-name'
 ```
 
-The `management.cattle.io/cluster-display-name` must match the OCM ManagedCluster name.
+The `management.cattle.io/cluster-display-name` must match the ManagedCluster name.
 
 ### BundleDeployment stuck
 

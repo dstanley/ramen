@@ -12,7 +12,7 @@
 #
 # Prerequisites:
 # - ArgoCD installed on hub cluster
-# - setup-argocd-ocm.sh has been run to add clusters
+# - setup-argocd.sh has been run to add clusters
 # - argocd-dr-controller.sh running to manage labels
 # - DRPlacementControl and Placement created in ramen-test namespace
 #

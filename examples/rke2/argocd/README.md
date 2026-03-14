@@ -1,6 +1,6 @@
-# ArgoCD Integration with OCM Placement for Ramen DR
+# ArgoCD Integration with Ramen DR
 
-This directory contains scripts and manifests for setting up ArgoCD with OCM Placement integration for automatic application failover during DR operations.
+This directory contains scripts and manifests for setting up ArgoCD with Placement integration for automatic application failover during DR operations.
 
 ## Overview
 
@@ -40,8 +40,7 @@ ArgoCD's ClusterDecisionResource generator can read PlacementDecisions directly,
 ### Prerequisites
 
 - ArgoCD installed on hub cluster
-- OCM hub components running
-- Managed clusters (harv, marv) registered with OCM
+- OTS controller running on hub (see [ots/README.md](../ots/README.md))
 
 ### Install ArgoCD
 
@@ -56,12 +55,12 @@ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/st
 kubectl wait --for=condition=available --timeout=120s deployment -l app.kubernetes.io/part-of=argocd -n argocd --context rke2
 ```
 
-### Configure OCM Integration
+### Configure Placement Integration
 
-Run the setup script to configure ArgoCD with OCM Placement integration:
+Run the setup script to configure ArgoCD with Placement integration:
 
 ```bash
-./setup-argocd-ocm.sh
+./setup-argocd.sh
 ```
 
 This script:
@@ -155,7 +154,7 @@ ArgoCD handles relocate automatically:
 
 | File | Description |
 |------|-------------|
-| `setup-argocd-ocm.sh` | Script to configure ArgoCD with OCM integration |
+| `setup-argocd.sh` | Script to configure ArgoCD with Placement integration |
 | `argocd-dr-controller.sh` | Controller that manages cluster labels based on PlacementDecision |
 | `applicationset-cluster-generator.yaml` | ApplicationSet using Cluster generator (recommended) |
 | `rto-rpo-applicationset.yaml` | ApplicationSet using ClusterDecisionResource (has limitations) |

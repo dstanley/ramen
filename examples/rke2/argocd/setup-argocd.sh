@@ -1,8 +1,8 @@
 #!/bin/bash
-# Setup ArgoCD with OCM Placement Integration
-# Usage: ./setup-argocd-ocm.sh
+# Setup ArgoCD with Placement Integration
+# Usage: ./setup-argocd.sh
 #
-# This script configures ArgoCD to work with OCM PlacementDecision resources
+# This script configures ArgoCD to work with PlacementDecision resources
 # for automatic application deployment during DR operations.
 
 set -e
