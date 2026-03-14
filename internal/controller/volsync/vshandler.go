@@ -730,7 +730,16 @@ func (v *VSHandler) setupForFinalSync(rsSpec *ramendrv1alpha1.VolSyncReplication
 
 	// Ensure the application PVC is deleted before proceeding with final sync
 	if !util.ResourceIsDeleted(pvc) {
-		v.log.Info("Final sync will not run until PVC is deleted", "namespace", pvc.Namespace, "name", pvc.Name)
+		// PVC is not being deleted yet - initiate deletion
+		// The app should already be quiesced at this point (checked in validatePVCForFinalSync)
+		// The PVC has a finalizer that will keep it around until we complete the final sync setup
+		if err := v.client.Delete(v.ctx, pvc); err != nil {
+			v.log.Error(err, "Failed to delete PVC for final sync", "pvcName", pvc.Name)
+
+			return stop
+		}
+
+		v.log.Info("Initiated PVC deletion for final sync", "namespace", pvc.Namespace, "name", pvc.Name)
 
 		return stop
 	}
@@ -2125,6 +2134,16 @@ func (v *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.VolSyncReplicat
 			pvc.GetName())
 		v.log.Error(needsRecreateErr, "Need to delete pvc (pvc restored from snapshot)")
 
+		// Remove the Ramen finalizer before deleting, otherwise the PVC will be
+		// stuck in Terminating state indefinitely waiting for finalizer removal.
+		if err := util.NewResourceUpdater(pvc).
+			RemoveFinalizer(PVCFinalizerProtected).
+			Update(v.ctx, v.client); err != nil {
+			v.log.Error(err, "Error removing finalizer from pvc before deletion", "pvc name", pvc.GetName())
+
+			return nil, fmt.Errorf("error removing finalizer from pvc %s before deletion (%w)", pvc.GetName(), err)
+		}
+
 		delErr := v.client.Delete(v.ctx, pvc)
 		if delErr != nil {
 			v.log.Error(delErr, "Error deleting pvc", "pvc name", pvc.GetName())
@@ -2135,6 +2154,19 @@ func (v *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.VolSyncReplicat
 	}
 
 	l.V(1).Info("PVC createOrUpdate Complete", "op", op)
+
+	// Once the PVC is successfully created/updated from the snapshot, remove the
+	// created-by-ramen label so the VRG can enumerate it for protection. The label
+	// was needed during creation to prevent the VRG from picking up the PVC before
+	// it was fully restored, but must be removed afterward so the VRG recognizes
+	// it as a protected PVC and sets up VolSync replication.
+	if err := util.NewResourceUpdater(pvc).
+		DeleteLabel(util.CreatedByRamenLabel).
+		Update(v.ctx, v.client); err != nil {
+		l.Info("Failed to remove created-by-ramen label from restored PVC", "error", err)
+
+		return nil, fmt.Errorf("error removing created-by-ramen label from PVC %s (%w)", pvc.GetName(), err)
+	}
 
 	return pvc, nil
 }
