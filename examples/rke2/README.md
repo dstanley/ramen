@@ -5,7 +5,9 @@ RKE2/Harvester clusters using VolSync and Longhorn.
 
 This example uses an experimental [Ramen OTS controller](https://github.com/dstanley/ramen-ots)
 to fulfill OCM ManifestWork and ManagedClusterView CRs without requiring OCM
-runtime components.
+runtime components. The approach is informed by Martin Jackson's
+[ramendr-analysis](https://github.com/mhjacks/ramendr-analysis), which examines
+Ramen's OCM dependencies and proposes abstractions for decoupling them.
 
 ## Documentation
 
