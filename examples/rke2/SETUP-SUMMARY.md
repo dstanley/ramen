@@ -7,7 +7,7 @@ This document summarizes the steps to deploy Ramen DR with:
 ## Prerequisites
 
 - RKE2 cluster for hub
-- Two Harvester clusters for DR
+- Two Harvester clusters for DR (harv, marv in this example)
 - Container registry accessible from all clusters
 - If using VMs, set CPU type to `host` (for x86-64-v2 support)
 - Kubie for helper scripts
@@ -123,7 +123,6 @@ kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager --tail=20
 The OTS controller uses kubeconfig secrets (created during Step 2) to access managed clusters.
 Ensure your kubeconfig has working contexts for each managed cluster.
 
-For Harvester clusters, use `insecure-skip-tls-verify: true`:
 
 ```yaml
 # Example: kubie edit harv (or ~/.kube/harv.yaml)

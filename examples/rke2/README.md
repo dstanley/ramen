@@ -3,7 +3,7 @@
 Example configurations and scripts for running Ramen disaster recovery across
 RKE2/Harvester clusters using VolSync and Longhorn.
 
-This example uses the [Ramen OTS controller](https://github.com/dstanley/ramen-ots)
+This example uses an experimental [Ramen OTS controller](https://github.com/dstanley/ramen-ots)
 to fulfill OCM ManifestWork and ManagedClusterView CRs without requiring OCM
 runtime components.
 
