@@ -21,7 +21,7 @@ export REGISTRY=registry.example.com        # Container registry accessible from
 export HUB_API=https://hub.example.com:6443 # Hub cluster API server URL
 ```
 
-The examples use `harv` and `marv` as managed cluster names — substitute your own cluster names as registered with `clusteradm join --cluster-name`.
+The examples use `harv` and `marv` as managed cluster names — substitute your own cluster names.
 
 ## 1. Build Ramen Operator Image 
 
@@ -49,87 +49,34 @@ rm ramen-operator.tar
 ```
 
 
-## 2. Install OCM Hub
+## 2. Set Up OTS Controller
 
-**IMPORTANT**: Use clusteradm **v0.11.2** - newer versions removed the `application-manager` addon which is required for ManagedClusterView support.
+The OTS (Object Transport System) controller replaces OCM runtime components (klusterlet, work agents, addon controllers) by fulfilling ManifestWork and ManagedClusterView CRs directly from the hub using kubeconfig-based access to managed clusters.
+
+See [ots/README.md](ots/README.md) for full details.
 
 ```bash
-# Download clusteradm v0.11.2 (NOT latest!)
-curl -LO "https://github.com/open-cluster-management-io/clusteradm/releases/download/v0.11.2/clusteradm_darwin_arm64.tar.gz"
-tar -xzf clusteradm_darwin_arm64.tar.gz
-chmod +x clusteradm
-mv clusteradm ~/go/bin/  # or another directory in your PATH
+# Clone the OTS controller repo
+git clone https://github.com/dstanley/ramen-ots.git
 
-# Verify version
-clusteradm version
-# Should show: client version: v0.11.2
-
-# Initialize hub
-clusteradm init --wait
+# Run the setup script (installs CRDs, creates ManagedCluster CRs, deploys controller)
+./ots/setup-ots.sh --clusters harv,marv \
+  --kubeconfig ~/.kube/config \
+  --deploy-dir ramen-ots/scripts/deploy \
+  --image $REGISTRY/ramen-ots:latest
 
 # Verify
-kubectl get pods -n open-cluster-management
-kubectl get pods -n open-cluster-management-hub
+kubectl get deployment -n ramen-ots-system
+kubectl get managedclusters
 ```
 
-## 3. Install OCM CRDs (Required by Ramen)
+The setup script handles:
+1. Installing OCM CRDs (ManifestWork, ManagedClusterView, ManagedCluster, Placement, etc.)
+2. Creating ManagedCluster namespaces and CRs with proper status conditions
+3. Creating kubeconfig secrets for managed cluster access
+4. Deploying the OTS controller
 
-Ramen requires several OCM CRDs that are bundled in the ramen repo:
-
-```bash
-# ManagedClusterView CRD
-kubectl apply -f hack/test/view.open-cluster-management.io_managedclusterviews.yaml
-
-# PlacementRule CRD
-kubectl apply -f hack/test/apps.open-cluster-management.io_placementrules_crd.yaml
-```
-
-## 4. Install OCM Addons for ManagedClusterView Support
-
-ManagedClusterView (MCV) allows the hub to read resources from managed clusters. This requires specific addons.
-
-### 4.1 Install application-manager Hub Addon
-
-```bash
-# Must use clusteradm v0.11.2 for this command
-clusteradm install hub-addon --names application-manager
-
-# Verify pods are running
-kubectl get pods -n open-cluster-management | grep -E "subscription|channel|appsub|placementrule"
-```
-
-Expected pods:
-- multicluster-operators-subscription
-- multicluster-operators-channel
-- multicluster-operators-appsub-summary
-- multicluster-operators-placementrule
-
-### 4.2 Install work-manager ClusterManagementAddOn
-
-Clone multicloud-operators-foundation and apply the work-manager addon:
-
-```bash
-cd /tmp
-git clone --depth 1 https://github.com/stolostron/multicloud-operators-foundation.git
-
-# Apply CRDs to hub
-kubectl apply -f multicloud-operators-foundation/deploy/foundation/hub/crds/
-
-# Apply RBAC
-kubectl apply -f multicloud-operators-foundation/deploy/foundation/hub/rbac/
-
-# Apply ocm-controller (processes MCV on hub)
-kubectl apply -f multicloud-operators-foundation/deploy/foundation/hub/ocm-controller/ocm-controller.yaml
-
-# Apply work-manager ClusterManagementAddOn
-kubectl apply -f multicloud-operators-foundation/deploy/foundation/hub/ocm-controller/clustermanagementaddon.yaml
-
-# Verify
-kubectl get clustermanagementaddon
-# Should show: application-manager and work-manager
-```
-
-## 5. Deploy Ramen Hub Operator
+## 3. Deploy Ramen Hub Operator
 
 ```bash
 make deploy-hub IMG=$REGISTRY/ramen-operator:dev PLATFORM=k8s
@@ -138,10 +85,10 @@ make deploy-hub IMG=$REGISTRY/ramen-operator:dev PLATFORM=k8s
 kubectl get pods -n ramen-system
 ```
 
-## 6. Deploy MinIO for S3 Storage
+## 4. Deploy MinIO for S3 Storage
 
 ```bash
-kubectl apply -f examples/rke2/minio.yaml
+kubectl apply -f examples/rke2/config/minio.yaml
 
 # Wait for pod
 kubectl get pods -n minio-system -w
@@ -152,7 +99,7 @@ kubectl -n minio-system run mc-create-bucket --rm -it --restart=Never \
   --command -- /bin/sh -c "mc alias set myminio http://minio.minio-system.svc.cluster.local:9000 minioadmin minioadmin && mc mb --ignore-existing myminio/ramen"
 ```
 
-## 7. Configure Ramen Hub
+## 5. Configure Ramen Hub
 
 ```bash
 # Create S3 secret
@@ -162,7 +109,7 @@ kubectl create secret generic s3-secret -n ramen-system \
 
 # Create hub config
 kubectl create configmap ramen-hub-operator-config -n ramen-system \
-  --from-file=ramen_manager_config.yaml=examples/rke2/dr_hub_config.yaml
+  --from-file=ramen_manager_config.yaml=examples/rke2/config/dr_hub_config.yaml
 
 # Restart to pick up config
 kubectl rollout restart deployment -n ramen-system ramen-hub-operator
@@ -171,11 +118,12 @@ kubectl rollout restart deployment -n ramen-system ramen-hub-operator
 kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager --tail=20
 ```
 
-## 8. Join Managed Clusters (Harvester)
+## 6. Prepare Managed Cluster Kubeconfigs
 
-### 8.1 Prepare kubeconfigs
+The OTS controller uses kubeconfig secrets (created during Step 2) to access managed clusters.
+Ensure your kubeconfig has working contexts for each managed cluster.
 
-Export kubeconfigs from Harvester clusters. Use `insecure-skip-tls-verify: true`:
+For Harvester clusters, use `insecure-skip-tls-verify: true`:
 
 ```yaml
 # Example: kubie edit harv (or ~/.kube/harv.yaml)
@@ -198,41 +146,11 @@ contexts:
 current-context: "harv"
 ```
 
-### 8.2 Join clusters to hub
+Verify the OTS controller can reach both clusters:
 
 ```bash
-# Get join token from hub
-clusteradm get token
-
-# Join harv (run with harv kubeconfig context)
-
-Replace with your specific ip's as appropriate.
-
-kubie ctx harv
-clusteradm join --hub-token <token> --hub-apiserver $HUB_API --cluster-name harv --wait
-
-# Join marv
-kubie ctx marv
-clusteradm join --hub-token <token> --hub-apiserver $HUB_API --cluster-name marv --wait
-
-# Accept clusters on hub
-kubie ctx <hub>
-clusteradm accept --clusters harv,marv
-
-# Approve any pending CSRs (may need to run twice)
-kubectl get csr | grep -E "harv|marv" | grep Pending
-kubectl certificate approve <pending-csr-names>
-
-# Add 'name' labels to ManagedClusters (required for VolSync secret propagation)
-# The OCM PlacementRule controller selects clusters by label "name=<cluster>"
-# rather than metadata.name. Upstream OCM (clusteradm) does not set this
-# automatically, unlike RHACM. Without this label, the governance policy that
-# distributes the VolSync PSK secret will not propagate to managed clusters.
-kubectl label managedcluster harv name=harv
-kubectl label managedcluster marv name=marv
-
-# Verify
 kubectl get managedclusters
+kubectl logs -n ramen-ots-system deployment/ramen-ots-controller
 ```
 
 Expected output:
@@ -242,14 +160,14 @@ harv   true                                  True     True        10m
 marv   true                                  True     True        6m
 ```
 
-## 9. Check Harvester Nodes have access to registry
+## 7. Check Harvester Nodes have access to registry
 
 
-## 10. Install Required CRDs on Managed Clusters
+## 8. Install Required CRDs on Managed Clusters
 
 Ramen requires several CRDs on managed clusters for the DR cluster operator to function.
 
-### 10.1 CSI Addon CRDs
+### 8.1 CSI Addon CRDs
 
 ```bash
 # Apply to both harv and marv (test clusters in this example)
@@ -269,16 +187,7 @@ for cluster in harv marv; do
 done
 ```
 
-### 10.2 ManagedServiceAccount CRD (Required for OCM addons)
-
-```bash
-MSA_CRD="https://raw.githubusercontent.com/stolostron/managed-serviceaccount/main/config/crd/bases/authentication.open-cluster-management.io_managedserviceaccounts.yaml"
-
-kubie exec harv default kubectl apply -f "$MSA_CRD"
-kubie exec marv default kubectl apply -f "$MSA_CRD"
-```
-
-## 11. Deploy DR Cluster Operator on Managed Clusters
+## 9. Deploy DR Cluster Operator on Managed Clusters
 
 Installs the cluster operator on to the downstream harvester nodes.
 
@@ -296,7 +205,7 @@ kubie exec harv default kubectl get pods -n ramen-system
 kubie exec marv default kubectl get pods -n ramen-system
 ```
 
-## 12. Install VolSync on Managed Clusters
+## 10. Install VolSync on Managed Clusters
 
 These commands handle the installation of VolSync, the data mover that Ramen uses to replicate the PVCs between Harvester clusters.
 
@@ -313,7 +222,7 @@ kubie exec harv default kubectl get pods -n volsync-system
 kubie exec marv default kubectl get pods -n volsync-system
 ```
 
-## 12a. Configure StorageClass and VolumeSnapshotClass Labels (Critical!)
+## 10a. Configure StorageClass and VolumeSnapshotClass Labels (Critical!)
 
 **This step is required for VolSync async replication to work.**
 
@@ -342,7 +251,7 @@ for cluster in harv marv; do
 done
 ```
 
-## 12b. Install Submariner (Optional but Recommended)
+## 10b. Install Submariner (Optional but Recommended)
 
 Submariner provides secure cross-cluster networking. Without it, VolSync uses LoadBalancer services which may not work in all environments.
 
@@ -409,49 +318,29 @@ KUBECONFIG=/path/to/harv_kubeconfig.yaml subctl diagnose all
 
 Expected output shows connected gateways with low latency (~4ms for local network).
 
-## 13. Create ClusterClaim Resources on Managed Clusters
+## 11. Create ClusterClaim Resources on Managed Clusters
 
 Each managed cluster needs a ClusterClaim to identify itself:
 
 ```bash
 # On harv
-kubie exec harv default kubectl apply -f examples/rke2/clusterclaim-harv.yaml
+kubie exec harv default kubectl apply -f examples/rke2/config/clusterclaim-harv.yaml
 
 # On marv
-kubie exec marv default kubectl apply -f examples/rke2/clusterclaim-marv.yaml
+kubie exec marv default kubectl apply -f examples/rke2/config/clusterclaim-marv.yaml
 
 # Verify
 kubie exec harv default kubectl get clusterclaim
 kubie exec marv default kubectl get clusterclaim
 ```
 
-## 14. Enable OCM Addons on Managed Clusters
-
-Back on the hub, enable the addons for the managed clusters:
-
-```bash
-# Enable application-manager addon
-clusteradm addon enable --names application-manager --clusters harv,marv
-
-# Wait for pods to start on managed clusters
-sleep 30
-
-# Verify on managed clusters
-kubie exec harv default kubectl get pods -n open-cluster-management-agent-addon
-kubie exec marv default kubectl get pods -n open-cluster-management-agent-addon
-```
-
-Expected pods on each managed cluster:
-- application-manager
-- klusterlet-addon-workmgr (this processes ManagedClusterView!)
-
-## 15. Create DRCluster and DRPolicy Resources
+## 12. Create DRCluster and DRPolicy Resources
 
 On the hub cluster:
 
 ```bash
-kubectl apply -f examples/rke2/drcluster.yaml
-kubectl apply -f examples/rke2/drpolicy.yaml
+kubectl apply -f examples/rke2/config/drcluster.yaml
+kubectl apply -f examples/rke2/config/drpolicy.yaml
 
 # Verify validation
 kubectl get drcluster -o jsonpath='{range .items[*]}{.metadata.name}: {.status.conditions[?(@.type=="Validated")].status}{"\n"}{end}'
@@ -470,7 +359,7 @@ True
 ```bash
 # Hub cluster
 kubectl get managedclusters                    # Both should be Available=True
-kubectl get clustermanagementaddon             # application-manager, work-manager
+kubectl get deployment -n ramen-ots-system     # OTS controller running
 kubectl get drcluster                          # Both should exist
 kubectl get drpolicy                           # Should exist
 kubectl get managedclusterview -A              # MCVs should have Processing=True
@@ -479,9 +368,11 @@ kubectl get managedclusterview -A              # MCVs should have Processing=Tru
 kubectl get drcluster harv -o jsonpath='{.status.conditions[?(@.type=="Validated")].message}'
 # Should show: "Validated the cluster"
 
+# Check OTS controller logs
+kubectl logs -n ramen-ots-system deployment/ramen-ots-controller --tail=20
+
 # Managed clusters (harv/marv)
 kubie exec harv default kubectl get pods -n ramen-system             # 2/2 Running
-kubie exec harv default kubectl get pods -n open-cluster-management-agent-addon  # application-manager, klusterlet-addon-workmgr
 kubie exec harv default kubectl get drclusterconfig                   # Should exist with status
 kubie exec harv default kubectl get clusterclaim                      # id.k8s.io
 ```
@@ -492,17 +383,20 @@ kubie exec harv default kubectl get clusterclaim                      # id.k8s.i
 
 If DRClusters show "missing ManagedClusterView conditions":
 
-1. Verify `klusterlet-addon-workmgr` is running on managed clusters
-2. Check ClusterManagementAddOn/work-manager exists on hub
-3. Check ManagedClusterAddOn/work-manager exists in managed cluster namespaces
+1. Verify the OTS controller is running on the hub
+2. Check the OTS controller logs for errors accessing managed clusters
+3. Verify the kubeconfig secrets exist and are valid
 
 ```bash
-# On hub
-kubectl get clustermanagementaddon work-manager
-kubectl get managedclusteraddon -A | grep work-manager
+# Check OTS controller
+kubectl get deployment -n ramen-ots-system
+kubectl logs -n ramen-ots-system deployment/ramen-ots-controller --tail=50
 
-# On managed cluster
-kubie exec harv default kubectl get pods -n open-cluster-management-agent-addon | grep workmgr
+# Check kubeconfig secrets
+kubectl get secrets -n ramen-ots-system | grep kubeconfig
+
+# Verify MCV status
+kubectl get managedclusterview -A -o wide
 ```
 
 ### DR Cluster Operator CrashLoopBackOff
@@ -677,28 +571,17 @@ The VolSync PSK secret is never created on managed clusters even though the DRPC
 ERROR Failed to reconcile VolSync Replication Destination "error": "psk secret: <drpc-name>-vs-secret is not found"
 ```
 
-PlacementRule controller on hub shows:
-```
-listed clusters original count: 0
-```
+**Root Cause:** Ramen propagates VolSync PSK secrets via ManifestWork. If the ManifestWork is not being fulfilled, the secret won't appear on managed clusters.
 
-**Root Cause:** The `ManagedClusterSetBinding` is missing in the application namespace. The PlacementRule controller cannot discover managed clusters without it, so the OCM Policy that propagates the PSK secret is never placed on any cluster.
-
-**Fix:** Create the ManagedClusterSetBinding in the application namespace:
+**Fix:** Check that the OTS controller is running and the ManifestWork exists:
 ```bash
-kubectl apply -f - <<EOF
-apiVersion: cluster.open-cluster-management.io/v1beta2
-kind: ManagedClusterSetBinding
-metadata:
-  name: default
-  namespace: <app-namespace>
-spec:
-  clusterSet: default
-EOF
-```
+# Check for PSK secret ManifestWork
+kubectl get manifestwork -A | grep vs-secret
 
-Then trigger DRPC reconciliation:
-```bash
+# Check OTS controller logs
+kubectl logs -n ramen-ots-system deployment/ramen-ots-controller --tail=50
+
+# If needed, trigger DRPC reconciliation
 kubectl annotate drpc <drpc-name> -n <app-namespace> reconcile="$(date +%s)" --overwrite
 ```
 
@@ -772,16 +655,8 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           Hub Cluster (RKE2)                            │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  open-cluster-management:                                               │
-│    - cluster-manager                                                    │
-│    - multicluster-operators-subscription  (processes subscriptions)     │
-│    - multicluster-operators-channel                                     │
-│    - ocm-controller  (from stolostron/multicloud-operators-foundation)  │
-│                                                                         │
-│  open-cluster-management-hub:                                           │
-│    - cluster-manager-registration-controller                            │
-│    - cluster-manager-placement-controller                               │
-│    - cluster-manager-work-webhook                                       │
+│  ramen-ots-system:                                                      │
+│    - ramen-ots-controller  (fulfills ManifestWork + MCV via kubeconfig) │
 │                                                                         │
 │  ramen-system:                                                          │
 │    - ramen-hub-operator                                                 │
@@ -790,17 +665,12 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 │    - minio (S3 storage for DR metadata)                                 │
 └─────────────────────────────────────────────────────────────────────────┘
            │                                        │
-           │  ManifestWork (push)                   │  ManagedClusterView (pull)
+           │  ManifestWork (push via OTS)           │  ManagedClusterView (pull via OTS)
            │  DRClusterConfig                       │  DRClusterConfig status
            ▼                                        ▼
 ┌──────────────────────────────┐    ┌──────────────────────────────┐
 │   Managed Cluster: harv      │    │   Managed Cluster: marv      │
 ├──────────────────────────────┤    ├──────────────────────────────┤
-│  open-cluster-management-    │    │  open-cluster-management-    │
-│  agent-addon:                │    │  agent-addon:                │
-│    - application-manager     │    │    - application-manager     │
-│    - klusterlet-addon-workmgr│    │    - klusterlet-addon-workmgr│
-│                              │    │                              │
 │  ramen-system:               │    │  ramen-system:               │
 │    - ramen-dr-cluster-operator│   │    - ramen-dr-cluster-operator│
 │                              │    │                              │
@@ -812,14 +682,14 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 └──────────────────────────────┘    └──────────────────────────────┘
 ```
 
-## Key Components for MCV
+## How ManifestWork and MCV Work with OTS
 
-The **ManagedClusterView** mechanism allows the hub to read resources from managed clusters:
+The OTS controller on the hub fulfills both ManifestWork and ManagedClusterView CRs using direct kubeconfig access to managed clusters:
 
-1. **Hub side**: `ClusterManagementAddOn/work-manager` tells OCM to deploy the work-manager agent
-2. **Managed cluster side**: `klusterlet-addon-workmgr` watches for MCV resources and fetches data
+1. **ManifestWork (push)**: OTS watches ManifestWork CRs, applies embedded resources to the target managed cluster via server-side apply, and updates status conditions
+2. **ManagedClusterView (pull)**: OTS watches MCV CRs, reads the specified resource from the managed cluster, and writes the result to MCV status
 
-Without this, the hub operator cannot read DRClusterConfig status (storage classes, CIDRs, etc.) from managed clusters.
+No agents or addons are required on managed clusters. The OTS controller handles all hub-to-cluster communication.
 
 ## Failover and Failback Procedures
 
@@ -1007,7 +877,7 @@ kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}
 2. If you only watch PlacementDecision, you can't know to remove the app early
 3. This creates a deadlock: final sync needs PVC deleted, but app is using PVC
 
-**Root Cause:** In a full ACM/OCM setup with Subscriptions, the OCM Application Lifecycle controller would handle this. With manual ManifestWorks, there's no mechanism to detect "Relocate initiated" vs "Relocate completed".
+**Root Cause:** In a full ACM setup with Subscriptions, the Application Lifecycle controller would handle this. With manual ManifestWorks, there's no mechanism to detect "Relocate initiated" vs "Relocate completed".
 
 **Workaround:** The app controller must watch BOTH:
 1. **DRPC status.phase** (intent) - to detect `Relocating` phase and quiesce app early

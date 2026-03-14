@@ -1,10 +1,10 @@
 # Ramen DR Architecture on RKE2/Harvester
 
-This document describes the architecture and components involved in running Ramen Disaster Recovery with Open Cluster Management (OCM) on RKE2 and Harvester clusters.
+This document describes the architecture and components involved in running Ramen Disaster Recovery on RKE2 and Harvester clusters using the OTS (Object Transport System) controller.
 
 ## Overview
 
-Ramen provides application-level disaster recovery for Kubernetes workloads across multiple clusters. It uses OCM (Open Cluster Management) as the multi-cluster management layer to coordinate DR operations between a hub cluster and managed clusters.
+Ramen provides application-level disaster recovery for Kubernetes workloads across multiple clusters. It uses OCM (Open Cluster Management) CRDs as the multi-cluster API layer, with the OTS controller fulfilling ManifestWork and ManagedClusterView CRs via direct kubeconfig access to managed clusters.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -12,13 +12,13 @@ Ramen provides application-level disaster recovery for Kubernetes workloads acro
 │                         (Control Plane for DR)                               │
 │                                                                              │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │   OCM Hub       │  │  Ramen Hub      │  │    MinIO        │              │
-│  │   Components    │  │  Operator       │  │   (S3 Store)    │              │
+│  │   Ramen OTS     │  │  Ramen Hub      │  │    MinIO        │              │
+│  │   Controller    │  │  Operator       │  │   (S3 Store)    │              │
 │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘              │
 │           │                    │                    │                        │
-│           │    Coordinates     │   Manages DR       │  Stores DR            │
-│           │    Multi-cluster   │   Resources        │  Metadata             │
-│           │    Operations      │                    │                        │
+│           │    Fulfills MW     │   Manages DR       │  Stores DR            │
+│           │    and MCV CRs     │   Resources        │  Metadata             │
+│           │    via kubeconfig  │                    │                        │
 └───────────┼────────────────────┼────────────────────┼────────────────────────┘
             │                    │                    │
             │ ManifestWork       │ DRCluster          │ S3 API
@@ -29,10 +29,6 @@ Ramen provides application-level disaster recovery for Kubernetes workloads acro
 │      Managed Cluster 1        │ │      Managed Cluster 2        │
 │         (Primary)             │ │        (Secondary)            │
 │                               │ │                               │
-│  ┌─────────────────────────┐  │ │  ┌─────────────────────────┐  │
-│  │  OCM Klusterlet         │  │ │  │  OCM Klusterlet         │  │
-│  │  + Work Manager Addon   │  │ │  │  + Work Manager Addon   │  │
-│  └─────────────────────────┘  │ │  └─────────────────────────┘  │
 │  ┌─────────────────────────┐  │ │  ┌─────────────────────────┐  │
 │  │  Ramen DR Cluster       │  │ │  │  Ramen DR Cluster       │  │
 │  │  Operator               │  │ │  │  Operator               │  │
@@ -50,71 +46,35 @@ Ramen provides application-level disaster recovery for Kubernetes workloads acro
 └───────────────────────────────┘ └───────────────────────────────┘
 ```
 
+**Note:** No OCM runtime agents (klusterlet, work-agent, addon controllers) are required on managed clusters. The OTS controller on the hub handles all ManifestWork and ManagedClusterView fulfillment directly.
+
 ---
 
 ## Hub Cluster Components
 
-### Open Cluster Management (OCM) Hub
+### Ramen OTS Controller
 
-OCM provides the multi-cluster management foundation. On the hub, several controllers work together:
+The OTS controller replaces OCM runtime components by fulfilling ManifestWork and ManagedClusterView CRs via direct kubeconfig access to managed clusters.
 
-#### Namespace: `open-cluster-management`
-
-| Component | Description |
-|-----------|-------------|
-| **cluster-manager** | Main OCM operator that manages the lifecycle of hub controllers |
-| **multicluster-operators-subscription** | Handles GitOps-style application deployment via Subscriptions and Channels |
-| **multicluster-operators-channel** | Manages Channel resources (repositories for deployable content) |
-| **multicluster-operators-placementrule** | Evaluates PlacementRules to determine target clusters |
-| **multicluster-operators-appsub-summary** | Aggregates subscription status across clusters |
-| **ocm-controller** | From stolostron/multicloud-operators-foundation; manages cluster info and addon deployment |
-
-#### Namespace: `open-cluster-management-hub`
+**Namespace:** `ramen-ots-system`
 
 | Component | Description |
 |-----------|-------------|
-| **cluster-manager-registration-controller** | Handles managed cluster registration and CSR approval |
-| **cluster-manager-registration-webhook** | Validates ManagedCluster resources |
-| **cluster-manager-placement-controller** | Evaluates Placement resources for workload scheduling |
-| **cluster-manager-work-webhook** | Validates ManifestWork resources |
-| **cluster-manager-addon-manager-controller** | Manages addon lifecycle across managed clusters |
+| **ramen-ots-controller** | Watches ManifestWork CRs and applies embedded resources to managed clusters via server-side apply. Watches ManagedClusterView CRs and reads resources from managed clusters, writing results to MCV status. |
 
-#### OCM Governance Policy Framework (Required for VolSync)
+The OTS controller uses kubeconfig secrets stored in the `ramen-ots-system` namespace (one per managed cluster: `<cluster-name>-kubeconfig`).
 
-The governance policy framework enables Ramen to propagate VolSync secrets between clusters automatically.
+### OCM CRDs (Used by Ramen)
 
-**Namespace:** `open-cluster-management-hub`
-
-| Component | Description |
-|-----------|-------------|
-| **governance-policy-propagator** | Propagates Policy resources to managed clusters via ManifestWork |
-
-**Custom Resources:**
+Ramen uses OCM CRDs as its multi-cluster API. These CRDs are installed on the hub without requiring the full OCM runtime:
 
 | CRD | API Group | Description |
 |-----|-----------|-------------|
-| **Policy** | `policy.open-cluster-management.io/v1` | Defines a policy containing objects to enforce on managed clusters |
-| **PlacementBinding** | `policy.open-cluster-management.io/v1` | Binds a Policy to a Placement/PlacementRule for cluster selection |
-
-**Why This is Required:**
-
-Ramen uses OCM Policy to propagate VolSync PSK (Pre-Shared Key) secrets to managed clusters. Without the governance policy framework:
-- VolSync secrets must be manually copied to each cluster
-- DRPC will show errors: `no matches for kind "Policy" in version "policy.open-cluster-management.io/v1"`
-- Replication will fail until secrets are manually created
-
-**Important:** A `ManagedClusterSetBinding` must exist in the application namespace for the PlacementRule controller to discover managed clusters. Without it, the Policy that propagates the PSK secret will never be placed on any cluster. See the `demo-dr.sh` script for an example.
-
-**Installation:**
-
-```bash
-# Install on hub
-clusteradm install hub-addon --names governance-policy-framework
-
-# Enable on managed clusters
-clusteradm addon enable --names governance-policy-framework --clusters <cluster1>,<cluster2>
-clusteradm addon enable --names config-policy-controller --clusters <cluster1>,<cluster2>
-```
+| **ManagedCluster** | `cluster.open-cluster-management.io/v1` | Represents a managed cluster |
+| **ManifestWork** | `work.open-cluster-management.io/v1` | Resources to apply on a managed cluster |
+| **ManagedClusterView** | `view.open-cluster-management.io/v1beta1` | Request to read a resource from a managed cluster |
+| **Placement** | `cluster.open-cluster-management.io/v1beta1` | Cluster selection criteria |
+| **PlacementDecision** | `cluster.open-cluster-management.io/v1beta1` | Selected clusters from Placement evaluation |
 
 ### Ramen Hub Operator
 
@@ -153,27 +113,7 @@ Ramen uses S3 as a coordination point between clusters during failover.
 
 ## Managed Cluster Components
 
-### OCM Klusterlet
-
-The klusterlet is the OCM agent that runs on each managed cluster.
-
-#### Namespace: `open-cluster-management-agent`
-
-| Component | Description |
-|-----------|-------------|
-| **klusterlet-registration-agent** | Registers the cluster with the hub, maintains heartbeat, handles CSR rotation |
-| **klusterlet-work-agent** | Applies ManifestWork resources from the hub to the local cluster |
-
-#### Namespace: `open-cluster-management-agent-addon`
-
-| Component | Description |
-|-----------|-------------|
-| **application-manager** | Processes Subscription resources for GitOps deployments |
-| **klusterlet-addon-workmgr** | **Critical for Ramen**: Processes ManagedClusterView requests from the hub |
-| **governance-policy-framework** | **Required for VolSync**: Syncs Policy resources from hub, creates local policy objects |
-| **config-policy-controller** | **Required for VolSync**: Enforces ConfigurationPolicy resources (creates/updates secrets) |
-
-**Note:** Without `governance-policy-framework` and `config-policy-controller`, VolSync PSK secrets will not be automatically propagated to managed clusters.
+No OCM agents or addons are required on managed clusters. The OTS controller on the hub handles all ManifestWork and ManagedClusterView fulfillment directly via kubeconfig access.
 
 ### Ramen DR Cluster Operator
 
@@ -237,7 +177,7 @@ Same storageID across clusters triggers sync replication detection. See the VolS
 
 ### Hub to Managed Cluster (Push)
 
-The hub pushes configuration to managed clusters using **ManifestWork**:
+The hub pushes configuration to managed clusters using **ManifestWork**, fulfilled by the OTS controller:
 
 ```
 Hub                                    Managed Cluster
@@ -247,41 +187,39 @@ Hub                                    Managed Cluster
  │   VolumeReplicationGroup, etc.)           │
  │ ─────────────────────────────────────────>│
  │                                           │
- │                        klusterlet-work-agent
- │                        applies resources locally
+ │            OTS controller applies resources
+ │            via kubeconfig + server-side apply
 ```
 
-**ManifestWork** is an OCM resource that:
+**ManifestWork** is an OCM CRD that:
 1. Is created in the managed cluster's namespace on the hub (e.g., `harv` namespace for harv cluster)
 2. Contains embedded Kubernetes resources to apply
-3. Is picked up by the klusterlet-work-agent on the managed cluster
-4. Reports back status via ManifestWork.status
+3. Is fulfilled by the OTS controller, which applies resources to the managed cluster via kubeconfig
+4. Status conditions are updated by the OTS controller (Applied, Available, Degraded)
 
 ### Managed Cluster to Hub (Pull via MCV)
 
-The hub reads resources from managed clusters using **ManagedClusterView**:
+The hub reads resources from managed clusters using **ManagedClusterView**, fulfilled by the OTS controller:
 
 ```
 Hub                                    Managed Cluster
  │                                           │
  │  ManagedClusterView                       │
  │  (request to read DRClusterConfig)        │
- │ ─────────────────────────────────────────>│
  │                                           │
- │                        klusterlet-addon-workmgr
- │                        fetches the resource
+ │  OTS controller reads the resource        │
+ │  from managed cluster via kubeconfig      │
+ │ ─────────────────────────────────────────>│
  │                                           │
  │  MCV.status.result                        │
  │  (contains DRClusterConfig data)          │
- │ <─────────────────────────────────────────│
+ │  Updated by OTS controller               │
 ```
 
 **ManagedClusterView** allows the hub to:
 1. Read any resource from a managed cluster
 2. Get the result in MCV.status.result
-3. React to changes (via watch/reconcile)
-
-**Important:** MCV requires the `klusterlet-addon-workmgr` agent, which is deployed via the `work-manager` ClusterManagementAddOn.
+3. React to changes (OTS controller periodically refreshes MCV status)
 
 ### Data Replication (VolSync)
 
@@ -325,13 +263,13 @@ With Submariner:
 
 ---
 
-## OCM Application Deployment Models
+## Application Deployment Models
 
-Ramen supports applications deployed via different OCM deployment models. Understanding these models is critical because **how your application is deployed determines whether failover completes automatically or requires manual intervention**.
+Ramen supports applications deployed via different deployment models. Understanding these models is critical because **how your application is deployed determines whether failover completes automatically or requires manual intervention**.
 
-### Model 1: OCM Subscription/Channel (Recommended for DR)
+### Model 1: OCM Subscription/Channel (Requires OCM Runtime)
 
-OCM Subscriptions provide GitOps-style application deployment with automatic cluster placement.
+OCM Subscriptions provide GitOps-style application deployment with automatic cluster placement. **This model requires the full OCM runtime (klusterlet, subscription controller, etc.) and is not used with the OTS controller.**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -594,7 +532,7 @@ The GitRepo **must not** include PVC manifests. A `.fleetignore` file in the app
 
 **If using Rancher:** Fleet is the natural choice since it's already installed. No additional components needed.
 
-**For failover-only scenarios:** OCM Subscription works well - the application is automatically deployed to the target cluster.
+**For failover-only scenarios with full OCM runtime:** OCM Subscription works well - the application is automatically deployed to the target cluster.
 
 **If using ManifestWork-only deployment:** Be prepared to manually deploy applications and clean up the source during DR operations.
 
@@ -664,8 +602,9 @@ func getVRGNamespace(placement) string {
    └─> This triggers application deployment (see deployment model)
 
 5. Application controller reacts (model-dependent):
-   ├─> OCM Subscription: subscription-controller deploys app to target
    ├─> ArgoCD: ApplicationSet creates Application for target cluster
+   ├─> Fleet: DR controller relabels cluster, Fleet deploys app to target
+   ├─> OCM Subscription: subscription-controller deploys app (requires OCM runtime)
    └─> ManifestWork only: ❌ NO AUTOMATIC DEPLOYMENT - manual intervention needed
 
 6. Hub DRPC controller - Progression: Completed
@@ -885,26 +824,9 @@ kubectl get placementdecision -n my-app-ns
 kubectl get placementdecision -n my-app-ns -o yaml | grep -A5 decisions
 ```
 
-### Required OCM Components
+### Required OCM Components (Subscription Model Only)
 
-For OCM Subscriptions to work, ensure these components are installed:
-
-**On Hub:**
-- `multicluster-operators-subscription` (from stolostron/multicloud-operators-subscription)
-- `multicluster-operators-channel`
-- `multicluster-operators-placementrule` (legacy) or placement-controller
-
-**On Managed Clusters:**
-- `application-manager` addon (from work-manager ClusterManagementAddOn)
-
-Verify with:
-```bash
-# Hub
-kubectl get pods -n open-cluster-management | grep -E "subscription|channel|placement"
-
-# Managed cluster
-kubectl get pods -n open-cluster-management-agent-addon | grep application-manager
-```
+The OCM Subscription model requires the full OCM runtime. If using OTS with ArgoCD, Fleet, or ManifestWork deployment models, these components are **not needed**.
 
 ---
 
@@ -968,16 +890,11 @@ kubectl get pods -n open-cluster-management-agent-addon | grep application-manag
 
 | CRD | Source | Used By |
 |-----|--------|---------|
-| ManagedCluster | OCM | cluster-manager |
-| ManagedClusterSet | OCM | cluster-manager |
-| Placement | OCM | placement-controller |
-| PlacementRule | OCM (legacy) | Ramen |
-| ManifestWork | OCM | work-webhook |
-| ManagedClusterView | OCM/stolostron | Ramen hub |
-| ManagedClusterAddOn | OCM | addon-manager |
-| ClusterManagementAddOn | OCM | addon-manager |
-| **Policy** | **OCM Governance** | **Ramen hub (VolSync secret propagation)** |
-| **PlacementBinding** | **OCM Governance** | **Ramen hub (binds Policy to clusters)** |
+| ManagedCluster | OCM CRDs | OTS controller, Ramen hub |
+| Placement | OCM CRDs | Ramen hub |
+| PlacementDecision | OCM CRDs | Ramen hub |
+| ManifestWork | OCM CRDs | Ramen hub, OTS controller |
+| ManagedClusterView | OCM CRDs | Ramen hub, OTS controller |
 | DRCluster | Ramen | ramen-hub-operator |
 | DRPolicy | Ramen | ramen-hub-operator |
 | DRPlacementControl | Ramen | ramen-hub-operator |
@@ -986,11 +903,7 @@ kubectl get pods -n open-cluster-management-agent-addon | grep application-manag
 
 | CRD | Source | Used By |
 |-----|--------|---------|
-| Klusterlet | OCM | klusterlet operator |
-| AppliedManifestWork | OCM | klusterlet-work-agent |
-| ClusterClaim | OCM | klusterlet |
-| ManagedServiceAccount | stolostron | application-manager |
-| **ConfigurationPolicy** | **OCM Governance** | **config-policy-controller (enforces secrets)** |
+| ClusterClaim | OCM CRDs | Ramen (cluster identity) |
 | DRClusterConfig | Ramen | ramen-dr-cluster-operator |
 | VolumeReplicationGroup | Ramen | ramen-dr-cluster-operator |
 | ReplicationSource | VolSync | volsync |
@@ -1117,8 +1030,7 @@ metadata:
 
 | Source | Destination | Port | Purpose |
 |--------|-------------|------|---------|
-| Hub | Managed cluster API | 6443 | ManifestWork, MCV |
-| Managed cluster | Hub API | 6443 | Registration, status reporting |
+| Hub | Managed cluster API | 6443 | OTS controller (ManifestWork, MCV) |
 | Managed cluster | Managed cluster | 8000 | VolSync rsync-tls (via Submariner or LoadBalancer) |
 | Managed cluster | Managed cluster | 4500/UDP | Submariner IPsec NAT-T |
 | Managed cluster | Managed cluster | 4800/UDP | Submariner VXLAN (backup) |
@@ -1132,9 +1044,12 @@ metadata:
 
 ## Debugging Tips
 
-### Check OCM Communication
+### Check OTS Controller and Communication
 
 ```bash
+# OTS controller logs
+kubectl logs -n ramen-ots-system deployment/ramen-ots-controller --tail=50
+
 # Hub: Check ManifestWork status
 kubectl get manifestwork -n harv -o yaml
 
@@ -1142,8 +1057,8 @@ kubectl get manifestwork -n harv -o yaml
 kubectl get managedclusterview -n harv -o yaml
 
 # Managed: Check if resources were applied
-kubectl get drclusterconfig
-kubectl get vrg -A
+kubectl get drclusterconfig --context harv
+kubectl get vrg -A --context harv
 ```
 
 ### Check Ramen Controllers
@@ -1153,7 +1068,7 @@ kubectl get vrg -A
 kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager -f
 
 # DR cluster operator logs (on managed cluster)
-kubectl logs -n ramen-system deployment/ramen-dr-cluster-operator -c manager -f
+kubectl logs -n ramen-system deployment/ramen-dr-cluster-operator -c manager -f --context harv
 ```
 
 ### Check VolSync
@@ -1167,39 +1082,16 @@ kubectl get replicationdestination -A
 kubectl describe replicationsource -n <namespace> <name>
 ```
 
-### Check Policy Framework (VolSync Secret Propagation)
-
-```bash
-# Verify Policy CRDs exist on hub
-kubectl get crd | grep -E "policies.policy.open-cluster-management|placementbindings"
-
-# Check if policy addons are available on managed clusters
-kubectl get managedclusteraddons -A | grep -E "policy|config"
-
-# Check Policy resources for a DRPC (on hub)
-kubectl get policy -n <app-namespace>
-
-# Check if Policy shows Compliant (on hub)
-kubectl get policy -n <app-namespace> -o wide
-
-# Check hub operator logs for policy errors
-kubectl logs -n ramen-system deployment/ramen-hub-operator -c manager | grep -i policy
-
-# Verify secret exists on managed cluster
-kubectl get secret <drpc-name>-vs-secret -n <app-namespace>
-```
-
 ### Common Issues
 
 | Symptom | Likely Cause | Check |
 |---------|--------------|-------|
-| DRCluster not validated | MCV not working | `kubectl get managedclusterview -A` |
-| VRG not created | ManifestWork not applied | `kubectl get manifestwork -n <cluster>` |
+| DRCluster not validated | MCV not working | `kubectl get managedclusterview -A` then check OTS logs |
+| VRG not created | ManifestWork not applied | `kubectl get manifestwork -n <cluster>` then check OTS logs |
 | Data not replicating | VolSync misconfigured | `kubectl get replicationsource -A` |
 | Failover fails | S3 connectivity | Check S3 secret, bucket existence |
-| **VolSync secret not found** | **Policy CRDs missing** | **`kubectl get crd \| grep policies`** |
-| **Hub logs: "no matches for kind Policy"** | **governance-policy-framework not installed** | **`clusteradm install hub-addon --names governance-policy-framework`** |
-| **ReplicationDestination not created** | **PSK secret missing on secondary** | **Check policy compliance: `kubectl get policy -n <ns>`** |
+| VolSync secret not found | ManifestWork not fulfilled | Check OTS controller logs for errors |
+| ReplicationDestination not created | PSK secret missing on secondary | `kubectl get secret <drpc>-vs-secret -n <ns> --context <cluster>` |
 
 ---
 
@@ -1207,9 +1099,7 @@ kubectl get secret <drpc-name>-vs-secret -n <app-namespace>
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| clusteradm | v0.11.2 | Must use this version for application-manager addon |
-| OCM | 0.16.x | Installed via clusteradm |
-| multicloud-operators-foundation | main | For work-manager addon |
+| Ramen OTS Controller | latest | Fulfills ManifestWork + MCV via kubeconfig |
 | Ramen | dev | Built from source |
 | VolSync | 0.10.x | Helm chart |
 | Longhorn | 1.7.x | Bundled with Harvester |
