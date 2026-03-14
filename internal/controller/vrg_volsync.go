@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ramendrv1alpha1 "github.com/ramendr/ramen/api/v1alpha1"
 	"github.com/ramendr/ramen/internal/controller/cephfscg"
@@ -160,6 +161,13 @@ func (v *VRGInstance) reconcilePVCAsVolSyncPrimary(pvc corev1.PersistentVolumeCl
 	protectedPVC, requeue := v.buildProtectedPVCForPVC(pvc)
 	if requeue {
 		return true
+	}
+
+	// If PVC is being deleted, protectedPVC will be nil - skip processing
+	if protectedPVC == nil {
+		v.log.Info("Skipping PVC being deleted", "pvc", pvc.Name)
+
+		return false
 	}
 
 	if util.IsSubmarinerEnabled(v.instance.GetAnnotations()) {
@@ -939,6 +947,33 @@ func (v *VRGInstance) cleanupResources() error {
 		if err := v.doCleanupResources(protectedPVC.Name, protectedPVC.Namespace); err != nil {
 			return err
 		}
+
+		// Also remove finalizer from RDSpec PVCs (fix for Secondary VRG cleanup)
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcKey := types.NamespacedName{Name: protectedPVC.Name, Namespace: protectedPVC.Namespace}
+
+		if err := v.reconciler.Client.Get(v.ctx, pvcKey, pvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				v.log.Info("PVC not found during cleanup, skipping finalizer removal", "pvc", pvcKey)
+
+				continue
+			}
+
+			return err
+		}
+
+		if controllerutil.ContainsFinalizer(pvc, volsync.PVCFinalizerProtected) {
+			err := util.NewResourceUpdater(pvc).
+				RemoveFinalizer(volsync.PVCFinalizerProtected).
+				Update(v.ctx, v.reconciler.Client)
+			if err != nil {
+				v.log.Info("Failed to remove finalizer from RDSpec PVC", "pvcName", pvc.GetName(), "error", err)
+
+				return err
+			}
+
+			v.log.Info("Removed finalizer from RDSpec PVC", "pvcName", pvc.GetName())
+		}
 	}
 
 	return nil
@@ -994,11 +1029,37 @@ func (v *VRGInstance) validateSecondaryPVCConflictForVolsync() bool {
 		}
 
 		if !matchFound {
+			// During a relocate, the VRG transitions from primary to secondary. PVCs that were
+			// previously protected as primary may still exist while the application is being
+			// cleaned up. These are not conflicts — they are expected transient leftovers.
+			// Check if the PVC matches a previously protected PVC to avoid a false conflict
+			// that would block the SettingUpVolSyncDest progression.
+			if v.isPreviouslyProtectedPVC(pvc.GetName(), pvc.GetNamespace()) {
+				v.log.Info("Skipping conflict for PVC that was previously protected as primary",
+					"pvc", pvc.GetName(), "namespace", pvc.GetNamespace())
+
+				continue
+			}
+
 			return true // No match found for this PVC, conflict detected!
 		}
 	}
 
 	return false // No conflicts found
+}
+
+// isPreviouslyProtectedPVC checks if a PVC was previously protected by this VRG when it was primary.
+// This is used during the primary-to-secondary transition to avoid false conflict detection
+// for PVCs that haven't been cleaned up yet.
+func (v *VRGInstance) isPreviouslyProtectedPVC(name, namespace string) bool {
+	for i := range v.instance.Status.ProtectedPVCs {
+		if v.instance.Status.ProtectedPVCs[i].Name == name &&
+			v.instance.Status.ProtectedPVCs[i].Namespace == namespace {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (v *VRGInstance) aggregateVolSyncClusterDataConflictCondition() *metav1.Condition {
