@@ -15,7 +15,6 @@ Ramen's OCM dependencies and proposes abstractions for decoupling them.
 |----------|-------------|
 | [SETUP-SUMMARY.md](SETUP-SUMMARY.md) | Step-by-step setup guide |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture overview, DR operation flows, deployment models |
-| [ots/README.md](ots/README.md) | OTS controller setup and migration scripts |
 
 ## Directory Structure
 
@@ -28,14 +27,13 @@ rke2/
     dr_cluster_config.yaml     # Ramen DR cluster operator configuration
     minio.yaml                 # MinIO deployment for S3 storage
   scripts/
+    setup-ots.sh               # Set up OTS controller and managed clusters
+    setup-submariner.sh        # Configure cross-cluster networking
     demo-dr.sh                 # Unified DR demo: deploy, failover, relocate, cleanup
     dr-status.sh               # Check DR status
     dr-failover.sh             # Execute failover
     dr-relocate.sh             # Execute relocation
   test-app/                    # Sample DR-protected application manifests
-  ots/
-    setup-ots.sh               # Set up OTS controller and managed clusters
-    setup-submariner.sh        # Configure cross-cluster networking
   argocd/                      # ArgoCD integration (ApplicationSet + DR controller)
   fleet/                       # Rancher Fleet integration (GitRepo + DR controller)
 ```

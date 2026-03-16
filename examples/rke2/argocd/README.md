@@ -40,7 +40,7 @@ ArgoCD's ClusterDecisionResource generator can read PlacementDecisions directly,
 ### Prerequisites
 
 - ArgoCD installed on hub cluster
-- OTS controller running on hub (see [ots/README.md](../ots/README.md))
+- OTS controller running on hub (see [SETUP-SUMMARY.md](../SETUP-SUMMARY.md))
 
 ### Install ArgoCD
 

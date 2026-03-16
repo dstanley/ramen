@@ -32,7 +32,7 @@ marv        c-djjjc     management.cattle.io/cluster-display-name=marv
 
 - Rancher installed on hub cluster (Fleet is bundled with Rancher)
 - Managed clusters registered with Rancher
-- OTS controller running on hub (see [ots/README.md](../ots/README.md))
+- OTS controller running on hub (see [SETUP-SUMMARY.md](../SETUP-SUMMARY.md))
 
 ### Verify Fleet Installation
 

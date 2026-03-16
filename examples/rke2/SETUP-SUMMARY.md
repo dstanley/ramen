@@ -52,14 +52,12 @@ docker save ramen-ots:latest -o ramen-ots.tar                                   
 
 The OTS (Object Transport System) controller replaces OCM runtime components (klusterlet, work agents, addon controllers) by fulfilling ManifestWork and ManagedClusterView CRs directly from the hub using kubeconfig-based access to managed clusters.
 
-See [ots/README.md](ots/README.md) for full details.
-
 ```bash
 # Clone the OTS controller repo
 git clone https://github.com/dstanley/ramen-ots.git
 
 # Run the setup script (installs CRDs, creates ManagedCluster CRs, deploys controller)
-./ots/setup-ots.sh --clusters harv,marv \
+./scripts/setup-ots.sh --clusters harv,marv \
   --kubeconfig ~/.kube/config \
   --deploy-dir ramen-ots/scripts/deploy \
   --image $REGISTRY/ramen-ots:latest
