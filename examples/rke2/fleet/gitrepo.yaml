@@ -25,7 +25,7 @@ spec:
   # Source: Ramen repository
   # Update repo and branch to match your fork/branch
   repo: https://github.com/dstanley/ramen.git
-  branch: ramen_rke2_longhorn
+  branch: rke2-ots
 
   # Path within the repo containing the application manifests
   # Fleet reads fleet.yaml and .fleetignore from this directory

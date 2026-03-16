@@ -12,7 +12,7 @@
 # 3. Fleet GitRepo (using clusterSelector) automatically deploys to labeled clusters
 #
 # Fleet clusters use auto-generated IDs (e.g., c-npk9v) rather than friendly names.
-# This controller resolves OCM cluster names (harv, marv) to Fleet cluster IDs
+# This controller resolves managed cluster names (harv, marv) to Fleet cluster IDs
 # using the management.cattle.io/cluster-display-name label.
 
 set -e
@@ -80,47 +80,28 @@ preflight_checks() {
         failed=1
     fi
 
-    # Placement controller
-    local placement_pods
-    placement_pods=$(kubectl --context "$HUB_CONTEXT" get pods -n open-cluster-management-hub \
-        -l app=clustermanager-placement-controller -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
-    if [[ "$placement_pods" == "Running" ]]; then
-        check_ok "Placement controller running"
+    # OTS controller
+    local ots_pod
+    ots_pod=$(kubectl --context "$HUB_CONTEXT" get pods -n ramen-ots-system -l app=ramen-ots-controller \
+        -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
+    if [[ "$ots_pod" == "Running" ]]; then
+        check_ok "OTS controller running"
     else
-        check_fail "Placement controller not found or not running"
+        check_fail "OTS controller not running in ramen-ots-system"
         failed=1
     fi
 
     # ManagedClusters
     local clusters
-    clusters=$(kubectl --context "$HUB_CONTEXT" get managedcluster -o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="ManagedClusterConditionAvailable")].status}{" "}{end}' 2>/dev/null || echo "")
+    clusters=$(kubectl --context "$HUB_CONTEXT" get managedcluster -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || echo "")
     if [[ -n "$clusters" ]]; then
-        for entry in $clusters; do
-            local cname="${entry%%=*}"
-            local cavail="${entry#*=}"
-            if [[ "$cavail" == "True" ]]; then
-                check_ok "ManagedCluster $cname (Available)"
-            else
-                check_warn "ManagedCluster $cname (Not Available)"
-            fi
+        for cname in $clusters; do
+            check_ok "ManagedCluster $cname"
         done
     else
         check_fail "No ManagedClusters found"
         failed=1
     fi
-
-    # ManagedCluster 'name' labels (required for VolSync secret propagation)
-    for entry in $clusters; do
-        local cname="${entry%%=*}"
-        local nlabel
-        nlabel=$(kubectl --context "$HUB_CONTEXT" get managedcluster "$cname" \
-            -o jsonpath='{.metadata.labels.name}' 2>/dev/null || echo "")
-        if [[ "$nlabel" == "$cname" ]]; then
-            check_ok "ManagedCluster $cname has name label"
-        else
-            check_warn "ManagedCluster $cname missing 'name' label (VolSync secret propagation may fail)"
-        fi
-    done
 
     # Fleet clusters
     local fleet_clusters
@@ -154,18 +135,10 @@ preflight_checks() {
     fi
 
     # Submariner
-    local subm_gw
-    subm_gw=$(kubectl --context "$HUB_CONTEXT" get submarinerconfig -A \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-    if [[ -n "$subm_gw" ]]; then
-        check_ok "Submariner config found"
+    if kubectl --context "$HUB_CONTEXT" get crd serviceexports.multicluster.x-k8s.io &>/dev/null; then
+        check_ok "Submariner CRDs present"
     else
-        # Check for ServiceExport CRD as alternative indicator
-        if kubectl --context "$HUB_CONTEXT" get crd serviceexports.multicluster.x-k8s.io &>/dev/null; then
-            check_ok "Submariner CRDs present"
-        else
-            check_warn "Submariner not detected (cross-cluster VolSync may not work)"
-        fi
+        check_warn "Submariner not detected (cross-cluster VolSync may not work)"
     fi
 
     # DRPolicy
@@ -194,16 +167,6 @@ preflight_checks() {
         failed=1
     fi
 
-    # Governance policy framework
-    local propagator
-    propagator=$(kubectl --context "$HUB_CONTEXT" get pods -n open-cluster-management \
-        -l name=governance-policy-propagator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
-    if [[ "$propagator" == "Running" ]]; then
-        check_ok "Governance policy propagator running"
-    else
-        check_warn "Governance policy propagator not found (VolSync secret propagation may fail)"
-    fi
-
     echo ""
     if [[ $failed -eq 1 ]]; then
         error "Preflight checks failed - resolve issues before continuing"
@@ -215,7 +178,7 @@ preflight_checks() {
 
 # --- Cluster resolution ---
 
-# Resolve OCM cluster name (e.g., harv) to Fleet cluster ID (e.g., c-npk9v)
+# Resolve managed cluster name (e.g., harv) to Fleet cluster ID (e.g., c-npk9v)
 resolve_fleet_cluster_id() {
     local display_name=$1
     kubectl --context "$HUB_CONTEXT" get clusters.fleet.cattle.io -n "$FLEET_NAMESPACE" \
@@ -322,6 +285,96 @@ show_drpc_summary() {
     fi
 }
 
+# Wait for DR operation to fully settle, then print an all-clear summary.
+# Checks: DRPC progression=Completed, PeerReady=True, Protected=True, and
+# Fleet bundles ready on the target cluster.
+wait_for_settle() {
+    local operation=$1   # "Failover" or "Relocate"
+    local target=$2      # target cluster name
+
+    local max_wait=300   # 5 minutes
+    local interval=5
+    local elapsed=0
+
+    info "Waiting for $operation to fully settle..."
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        local progression peer_ready protected
+        progression=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+            -o jsonpath='{.status.progression}' 2>/dev/null || echo "")
+        peer_ready=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+            -o jsonpath='{.status.conditions[?(@.type=="PeerReady")].status}' 2>/dev/null || echo "")
+        protected=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+            -o jsonpath='{.status.conditions[?(@.type=="Protected")].status}' 2>/dev/null || echo "")
+
+        # Check Fleet bundles on target
+        local bundles_ok="false"
+        if [[ -n "$target" ]]; then
+            local fleet_id
+            fleet_id=$(resolve_fleet_cluster_id "$target")
+            if [[ -n "$fleet_id" ]]; then
+                local ready_bundles
+                ready_bundles=$(kubectl --context "$HUB_CONTEXT" get clusters.fleet.cattle.io "$fleet_id" \
+                    -n "$FLEET_NAMESPACE" -o jsonpath='{.status.display.readyBundles}' 2>/dev/null || echo "")
+                if [[ -n "$ready_bundles" ]]; then
+                    local ready="${ready_bundles%%/*}"
+                    local desired="${ready_bundles##*/}"
+                    if [[ "$ready" == "$desired" && "$desired" -gt 0 ]]; then
+                        bundles_ok="true"
+                    fi
+                fi
+            fi
+        else
+            bundles_ok="true"
+        fi
+
+        if [[ "$progression" == "Completed" && "$peer_ready" == "True" && "$protected" == "True" && "$bundles_ok" == "true" ]]; then
+            echo ""
+            log "=== $operation Complete - All Clear ==="
+            # Gather RTO/RPO data
+            local duration action_start last_sync sync_duration sched_interval
+            duration=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.status.actionDuration}' 2>/dev/null || echo "unknown")
+            action_start=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.status.actionStartTime}' 2>/dev/null || echo "")
+            last_sync=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.status.lastGroupSyncTime}' 2>/dev/null || echo "")
+            sync_duration=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.status.lastGroupSyncDuration}' 2>/dev/null || echo "")
+            sched_interval=$(kubectl --context "$HUB_CONTEXT" get drpolicy \
+                -o jsonpath='{.items[0].spec.schedulingInterval}' 2>/dev/null || echo "unknown")
+
+            check_ok "Progression: Completed"
+            check_ok "PeerReady:   True"
+            check_ok "Protected:   True"
+            if [[ -n "$target" ]]; then
+                check_ok "Fleet:       $target bundles ready"
+            fi
+            echo ""
+            info "RTO/RPO Summary:"
+            check_ok "RTO (actual):        $duration"
+            check_ok "RPO (sync interval): $sched_interval"
+            if [[ -n "$last_sync" ]]; then
+                check_ok "Last sync:           $last_sync (took $sync_duration)"
+            fi
+            if [[ -n "$action_start" ]]; then
+                check_ok "Action started:      $action_start"
+            fi
+            echo ""
+            show_fleet_status
+            return 0
+        fi
+
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    warn "$operation did not fully settle within ${max_wait}s"
+    show_drpc_summary
+    show_fleet_status
+    return 1
+}
+
 # --- Label management ---
 
 get_all_fleet_clusters() {
@@ -341,7 +394,7 @@ label_fleet_cluster() {
     fleet_id=$(resolve_fleet_cluster_id "$ocm_name")
 
     if [[ -z "$fleet_id" ]]; then
-        error "Cannot resolve Fleet cluster ID for OCM cluster: $ocm_name"
+        error "Cannot resolve Fleet cluster ID for managed cluster: $ocm_name"
         return 1
     fi
 
@@ -590,7 +643,7 @@ while true; do
             FailedOver)
                 log "DRPC phase: FailedOver - failover complete"
                 show_drpc_summary
-                show_fleet_status
+                wait_for_settle "Failover" "$CURRENT_CLUSTER"
                 ;;
             Relocating)
                 warn "DRPC phase: Relocating - relocate in progress..."
@@ -599,7 +652,7 @@ while true; do
             Relocated)
                 log "DRPC phase: Relocated - relocate complete"
                 show_drpc_summary
-                show_fleet_status
+                wait_for_settle "Relocate" "$CURRENT_CLUSTER"
                 ;;
             *)
                 info "DRPC phase: $current_phase"

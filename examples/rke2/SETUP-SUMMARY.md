@@ -36,16 +36,15 @@ rdctl set --virtual-machine.use-rosetta
 rdctl shutdown && sleep 2 && open -a "Rancher Desktop" && sleep 30
 
 # Build for amd64
-docker buildx build --platform linux/amd64 -t $REGISTRY/ramen-operator:dev --load .
+docker buildx build --platform linux/amd64 -t $REGISTRY/ramen-ots:latest --load .
 ```
 
 ### Push to Registry (with self-signed cert)
 
 ```bash
 # Used skopeo to bypass TLS issues (test lab)
-docker save $REGISTRY/ramen-operator:dev -o ramen-operator.tar
-skopeo copy --dest-tls-verify=false docker-archive:ramen-operator.tar docker://$REGISTRY/ramen-operator:dev
-rm ramen-operator.tar
+
+docker save ramen-ots:latest -o ramen-ots.tar                                                                                                  skopeo copy --dest-tls-verify=false docker-archive:ramen-ots.tar docker://$REGISTRY/ramen-ots:latest                                           rm ramen-ots.tar                 
 ```
 
 
@@ -170,9 +169,6 @@ Ramen requires several CRDs on managed clusters for the DR cluster operator to f
 
 Only the VolumeReplication and VolumeReplicationClass CRDs are strictly required — the DR cluster operator will crash without them. The remaining CRDs are optional: VolumeGroupReplication and VolumeGroupSnapshot CRDs enable consistency group support for multi-PVC applications, while NetworkFenceClass and CSIAddonsNode enable storage-level network fencing for shared storage backends (e.g., Dell PowerFlex, Ceph/RBD). We install all of them since they are harmless if unused and avoid debugging missing-CRD issues later.
 
-```bash
-# Apply to both harv and marv (test clusters in this example)
-
 for cluster in harv marv; do
   echo "=== Applying CRDs to $cluster ==="
   kubie exec $cluster default kubectl apply -f hack/test/replication.storage.openshift.io_volumereplicationclasses.yaml
@@ -190,7 +186,7 @@ done
 
 ## 9. Deploy DR Cluster Operator on Managed Clusters
 
-Installs the cluster operator on to the downstream harvester nodes.
+Installs the cluster operator on to the downstream harvester (or RKE2) nodes.
 
 ```bash
 # On harv
