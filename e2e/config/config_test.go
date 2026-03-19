@@ -56,6 +56,63 @@ func TestReadConfig(t *testing.T) {
 	}
 }
 
+func TestValidateDistro(t *testing.T) {
+	tests := []struct {
+		name       string
+		distro     string
+		valid      bool
+		namespaces Namespaces
+	}{
+		{
+			name:       "k8s",
+			distro:     DistroK8s,
+			valid:      true,
+			namespaces: K8sNamespaces,
+		},
+		{
+			name:       "ocp",
+			distro:     DistroOcp,
+			valid:      true,
+			namespaces: OcpNamespaces,
+		},
+		{
+			name:       "rke2",
+			distro:     DistroRke2,
+			valid:      true,
+			namespaces: Rke2Namespaces,
+		},
+		{
+			name:   "empty (auto-detect)",
+			distro: "",
+			valid:  true,
+		},
+		{
+			name:   "invalid",
+			distro: "invalid-distro",
+			valid:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &Config{Distro: tt.distro}
+			err := validateDistro(config)
+
+			if tt.valid && err != nil {
+				t.Errorf("valid distro %q failed: %s", tt.distro, err)
+			}
+
+			if !tt.valid && err == nil {
+				t.Errorf("invalid distro %q did not fail", tt.distro)
+			}
+
+			if tt.valid && tt.distro != "" && config.Namespaces != tt.namespaces {
+				t.Errorf("distro %q: expected namespaces %+v, got %+v", tt.distro, tt.namespaces, config.Namespaces)
+			}
+		})
+	}
+}
+
 func TestValidatePVCSpecs(t *testing.T) {
 	tests := []struct {
 		name   string

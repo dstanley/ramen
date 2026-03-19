@@ -219,6 +219,8 @@ func detectDistro(ctx types.Context) error {
 		cfg.Namespaces = config.OcpNamespaces
 	case config.DistroK8s:
 		cfg.Namespaces = config.K8sNamespaces
+	case config.DistroRke2:
+		cfg.Namespaces = config.Rke2Namespaces
 	default:
 		panic(fmt.Sprintf("unexpected distro: %q", cfg.Distro))
 	}
@@ -230,8 +232,9 @@ func detectDistro(ctx types.Context) error {
 }
 
 // probeDistro determines the distribution of the given Kubernetes cluster.
-// Returns the detected distribution name ("ocp" or "k8s") or an error if detection fails.
+// Returns the detected distribution name ("ocp", "rke2", or "k8s") or an error if detection fails.
 func probeDistro(ctx types.Context, cluster *types.Cluster) (string, error) {
+	// Check for OpenShift first
 	configList := &unstructured.Unstructured{}
 	configList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "config.openshift.io",
@@ -245,12 +248,56 @@ func probeDistro(ctx types.Context, cluster *types.Cluster) (string, error) {
 		return config.DistroOcp, nil
 	}
 
-	if meta.IsNoMatchError(err) {
-		// api server says no match for OpenShift only resource type,
-		// it is not OpenShift
-		return config.DistroK8s, nil
+	if !meta.IsNoMatchError(err) {
+		// unexpected error
+		return "", err
 	}
 
-	// unexpected error
-	return "", err
+	// Not OpenShift, check for RKE2
+	if isRke2, err := probeRke2(ctx, cluster); err != nil {
+		return "", err
+	} else if isRke2 {
+		return config.DistroRke2, nil
+	}
+
+	// Default to generic Kubernetes
+	return config.DistroK8s, nil
+}
+
+// probeRke2 checks if the cluster is an RKE2 cluster by looking for RKE2-specific
+// indicators such as the cattle-system namespace (Rancher managed) or node labels.
+func probeRke2(ctx types.Context, cluster *types.Cluster) (bool, error) {
+	// Check for cattle-system namespace (indicates Rancher management)
+	ns := &v1.Namespace{}
+
+	err := cluster.Client.Get(ctx.Context(), client.ObjectKey{Name: "cattle-system"}, ns)
+	if err == nil {
+		// cattle-system namespace exists, likely RKE2 managed by Rancher
+		return true, nil
+	}
+
+	// Check for nodes with RKE2 labels
+	nodes := &v1.NodeList{}
+	if err := cluster.Client.List(ctx.Context(), nodes); err != nil {
+		return false, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	for _, node := range nodes.Items {
+		// RKE2 nodes typically have these indicators
+		if _, ok := node.Labels["node.kubernetes.io/instance-type"]; ok {
+			if strings.Contains(node.Status.NodeInfo.ContainerRuntimeVersion, "containerd") {
+				// Check for RKE2 specific annotations or kubelet version
+				if strings.Contains(node.Status.NodeInfo.KubeletVersion, "rke2") {
+					return true, nil
+				}
+			}
+		}
+
+		// Check for Rancher node labels
+		if _, ok := node.Labels["rke.cattle.io/machine"]; ok {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

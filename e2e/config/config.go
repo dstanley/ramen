@@ -17,8 +17,9 @@ import (
 
 const (
 	// Kubernetes distributions
-	DistroK8s = "k8s"
-	DistroOcp = "ocp"
+	DistroK8s  = "k8s"
+	DistroOcp  = "ocp"
+	DistroRke2 = "rke2"
 
 	// ClusterSet
 	DefaultClusterSetName = "default"
@@ -168,6 +169,14 @@ var OcpNamespaces = Namespaces{
 	ArgocdNamespace:         "openshift-gitops",
 }
 
+// Default namespace mappings for RKE2 clusters.
+var Rke2Namespaces = Namespaces{
+	RamenHubNamespace:       "ramen-system",
+	RamenDRClusterNamespace: "ramen-system",
+	RamenOpsNamespace:       "ramen-ops",
+	ArgocdNamespace:         "argocd",
+}
+
 var resourceNameForbiddenCharacters *regexp.Regexp
 
 func ReadConfig(configFile string, options Options) (*Config, error) {
@@ -228,9 +237,11 @@ func validateDistro(config *Config) error {
 		config.Namespaces = K8sNamespaces
 	case DistroOcp:
 		config.Namespaces = OcpNamespaces
+	case DistroRke2:
+		config.Namespaces = Rke2Namespaces
 	default:
-		return fmt.Errorf("invalid distro %q: (choose one of %q, %q)",
-			config.Distro, DistroK8s, DistroOcp)
+		return fmt.Errorf("invalid distro %q: (choose one of %q, %q, %q)",
+			config.Distro, DistroK8s, DistroOcp, DistroRke2)
 	}
 
 	return nil
