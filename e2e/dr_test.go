@@ -27,18 +27,21 @@ func TestDR(dt *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	if err := util.EnsureChannel(Ctx); err != nil {
-		t.Fatalf("Failed to ensure channel: %s", err)
-	}
-
-	t.Cleanup(func() {
-		timedCtx, cancel := Ctx.WithTimeout(1 * time.Minute)
-		defer cancel()
-
-		if err := util.EnsureChannelDeleted(timedCtx); err != nil {
-			t.Fatalf("Failed to ensure channel deleted: %s", err)
+	// Channel is only needed for the subscr (OCM Subscription) deployer.
+	if needsChannel(Ctx.Config()) {
+		if err := util.EnsureChannel(Ctx); err != nil {
+			t.Fatalf("Failed to ensure channel: %s", err)
 		}
-	})
+
+		t.Cleanup(func() {
+			timedCtx, cancel := Ctx.WithTimeout(1 * time.Minute)
+			defer cancel()
+
+			if err := util.EnsureChannelDeleted(timedCtx); err != nil {
+				t.Fatalf("Failed to ensure channel deleted: %s", err)
+			}
+		})
+	}
 
 	pvcSpecs := config.PVCSpecsMap(Ctx.Config())
 	deploySpecs := config.DeployersMap(Ctx.Config())
@@ -71,6 +74,20 @@ func TestDR(dt *testing.T) {
 			runTestFlow(t, ctx)
 		})
 	}
+}
+
+// needsChannel returns true if any configured test uses the subscr deployer,
+// which requires an OCM Channel resource for git-based application deployment.
+func needsChannel(cfg *config.Config) bool {
+	deploySpecs := config.DeployersMap(cfg)
+
+	for _, tc := range cfg.Tests {
+		if d, ok := deploySpecs[tc.Deployer]; ok && d.Type == "subscr" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func runTestFlow(t *test.T, ctx test.Context) {

@@ -134,7 +134,7 @@ func DeleteNamespaceOnManagedClusters(ctx types.Context, namespace string) error
 // See this link https://volsync.readthedocs.io/en/stable/usage/permissionmodel.html#controlling-mover-permissions
 // Workaround: add volsync annotation on app namespaces on both drclusters
 func AddVolsyncAnnontationOnManagedClusters(ctx types.Context, namespace string) error {
-	if ctx.Config().Distro != config.DistroK8s {
+	if ctx.Config().Distro == config.DistroOcp {
 		return nil
 	}
 

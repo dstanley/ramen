@@ -134,10 +134,13 @@ func waitDRPCProgression(
 		}
 
 		currentProgression := drpc.Status.Progression
-		if currentProgression == progression {
+		// Also accept Completed — in OTS mode the DRPC may advance past
+		// intermediate progressions (e.g. WaitOnUserToCleanUp) before the
+		// test polls, since cleanup happens automatically via ManifestWork.
+		if currentProgression == progression || currentProgression == ramen.ProgressionCompleted {
 			elapsed := time.Since(start)
 			log.Debugf("drpc \"%s/%s\" progression is %q in cluster %q in %.3f seconds",
-				namespace, name, progression, hub.Name, elapsed.Seconds())
+				namespace, name, currentProgression, hub.Name, elapsed.Seconds())
 
 			return nil
 		}

@@ -58,7 +58,7 @@ import (
 const (
 	DeployTimeout   = 5 * time.Minute
 	UndeployTimeout = 5 * time.Minute
-	EnableTimeout   = 5 * time.Minute
+	EnableTimeout   = 10 * time.Minute
 
 	// Typically less than 90 seconds, but in some cases it can take more than 5 minutes.
 	DisableTimeout = 10 * time.Minute
